@@ -401,27 +401,48 @@ def _metricas_portfolio_local(ret_por_ativo: dict, pesos: pd.Series) -> dict:
     }
 
 
+def _pesos_inverse_vol(ret_dev_por_ativo: dict) -> dict:
+    """Pesos por volatilidade inversa (mesma metodologia do portfolio_v4.py):
+    vol diária de cada ativo na janela comum a TODOS, peso_i = (1/vol_i)/soma.
+    Aqui sobre os retornos da estratégia ROBUSTA (não a otimizada)."""
+    datas = None
+    for s in ret_dev_por_ativo.values():
+        idx = s.index
+        datas = idx if datas is None else datas.intersection(idx)
+    if datas is None or len(datas) < 5:
+        return {}
+    datas = datas.sort_values()
+    dfret = pd.DataFrame({a: s.reindex(datas) for a, s in ret_dev_por_ativo.items()})
+    vol = dfret.std(ddof=1)
+    inv = 1.0 / vol
+    pesos = inv / inv.sum()
+    return {a: round(float(p) * 100, 2) for a, p in pesos.items()}
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
-def resumo_portfolio_robusto():
-    """Métricas de portfólio da estratégia ouro robusta: DEV só veteranas (janela
-    longa, ~5 anos, a mais confiável) e HOLDOUT com os 22 (12 meses fora da
-    amostra). Pesos de portfolio_v4_pesos.csv."""
-    df_p = carregar_csv(PESOS_CSV)
-    if df_p is None:
-        return None
-    pesos = df_p.set_index("Ativo")["Peso_Portfolio_%"] / 100.0
-    ret_dev_vet, ret_dev_vet_bh, ret_hold, ret_hold_bh = {}, {}, {}, {}
+def computar_portfolio_robusto():
+    """Faz UM passo por todos os 22 ativos com a receita robusta e devolve, de
+    uma vez: os pesos (inverse-vol da estratégia robusta, período de dev) e as
+    métricas de portfólio — DEV só veteranas (janela longa ~5 anos) e HOLDOUT
+    com os 22 (12 meses fora da amostra). Tudo com os MESMOS pesos robustos."""
+    ret_dev_all, ret_dev_vet, ret_dev_vet_bh, ret_hold, ret_hold_bh = {}, {}, {}, {}, {}
     for ativo, interval in ATIVOS_PORTFOLIO_V4.items():
         r = _ret_diario_robusto(ativo, interval)
         if r is None:
             continue
-        if r["dev"] and grupo_ouro(ativo) == "veterana":
-            ret_dev_vet[ativo] = r["dev"]["ret"]
-            ret_dev_vet_bh[ativo] = r["dev"]["ret_bh"]
+        if r["dev"]:
+            ret_dev_all[ativo] = r["dev"]["ret"]
+            if grupo_ouro(ativo) == "veterana":
+                ret_dev_vet[ativo] = r["dev"]["ret"]
+                ret_dev_vet_bh[ativo] = r["dev"]["ret_bh"]
         if r["holdout"]:
             ret_hold[ativo] = r["holdout"]["ret"]
             ret_hold_bh[ativo] = r["holdout"]["ret_bh"]
+
+    weights_pct = _pesos_inverse_vol(ret_dev_all)
+    pesos = pd.Series({a: p / 100.0 for a, p in weights_pct.items()})
     return {
+        "weights_pct": weights_pct,
         "dev_vet": _metricas_portfolio_local(ret_dev_vet, pesos),
         "dev_vet_bh": _metricas_portfolio_local(ret_dev_vet_bh, pesos),
         "hold": _metricas_portfolio_local(ret_hold, pesos),
@@ -491,15 +512,10 @@ st.caption(
 )
 
 df_resumo = carregar_csv(RESUMO_CSV)
-df_pesos = carregar_csv(PESOS_CSV)
 
 if df_resumo is None:
     st.error(f"Não encontrei {RESUMO_CSV}. Rode `python otimizador_v4.py` primeiro.")
     st.stop()
-
-pesos_map = {}
-if df_pesos is not None:
-    pesos_map = df_pesos.set_index("Ativo")["Peso_Portfolio_%"].to_dict()
 
 # ---- Resumo do portfólio no topo (ESTRATÉGIA OURO ROBUSTA, calculado ao vivo) ----
 st.header("Resumo do Portfólio — Estratégia Ouro Robusta")
@@ -508,16 +524,18 @@ st.caption(
     "não os parâmetros otimizados por ativo. Mesmos números que os sinais e gráficos abaixo."
 )
 
-with st.spinner("Calculando portfólio da estratégia robusta..."):
-    resumo_rob = resumo_portfolio_robusto()
+with st.spinner("Calculando portfólio e pesos da estratégia robusta..."):
+    resultado_rob = computar_portfolio_robusto()
+# pesos calculados AO VIVO pela volatilidade inversa da estratégia robusta
+pesos_map = resultado_rob["weights_pct"] if resultado_rob else {}
 
 col_dev, col_holdout = st.columns(2)
 
 with col_dev:
     st.subheader("📈 Desenvolvimento (veteranas, ~5 anos)")
     st.caption("Janela longa e confiável das 8 líquidas/antigas. A receita foi derivada aqui — não é validação cega.")
-    m = resumo_rob["dev_vet"] if resumo_rob else None
-    m_bh = resumo_rob["dev_vet_bh"] if resumo_rob else None
+    m = resultado_rob["dev_vet"] if resultado_rob else None
+    m_bh = resultado_rob["dev_vet_bh"] if resultado_rob else None
     if m is not None:
         c1, c2, c3 = st.columns(3)
         c1.metric("Retorno Anualizado", f"{m['ret_anual_%']:.2f}%")
@@ -532,8 +550,8 @@ with col_dev:
 with col_holdout:
     st.subheader("🔒 Holdout — VALIDAÇÃO REAL (mercado de baixa)")
     st.caption("Últimos 12 meses, nunca vistos na derivação da receita. Mede proteção de capital, não captura de alta.")
-    m = resumo_rob["hold"] if resumo_rob else None
-    m_bh = resumo_rob["hold_bh"] if resumo_rob else None
+    m = resultado_rob["hold"] if resultado_rob else None
+    m_bh = resultado_rob["hold_bh"] if resultado_rob else None
     if m is not None and m_bh is not None:
         c1, c2, c3 = st.columns(3)
         c1.metric(
@@ -628,10 +646,11 @@ for bloco in blocos:
                         {chip_html(f"peso {peso:.2f}%" if peso is not None else "peso n/d", "#64748b")}
                     </div>
                 """
-                if not grupo_liquido:
+                dsr_pct = row["DSR_%"]
+                if pd.notna(dsr_pct) and dsr_pct < DSR_ALERTA_LIMITE:
                     html += f"""
                     <div class="dsr-aviso" style="background:{COR_DSR_ALERTA}22; color:{COR_DSR_ALERTA}; border:1px solid {COR_DSR_ALERTA}55;">
-                        ⚠️ Moeda nova — sinal menos confiável (quase nenhuma passa no teste estatístico)
+                        ⚠️ Poucos trades no histórico — backtest sem significância estatística (DSR {dsr_pct:.1f}%); tratar com cautela
                     </div>
                     """
                 html += "</div>"
@@ -662,9 +681,10 @@ else:
     c2.metric("Peso no portfólio", f"{pesos_map.get(ativo_sel, float('nan')):.2f}%")
     c3.metric("Média lenta / filtro", f"{params['media_lenta']}/{params['media_filtro']}")
     c4.metric("ATR", f"{params['atr_periodo']}×{params['atr_multiplicador']}")
-    if grupo_a == "nova":
-        st.caption("⚠️ Moeda nova — historicamente pouco confiável (quase nenhuma passa no teste "
-                   "estatístico DSR). Os sinais existem, mas trate com cautela extra.")
+    dsr_ativo = row["DSR_%"]
+    if pd.notna(dsr_ativo) and dsr_ativo < DSR_ALERTA_LIMITE:
+        st.caption(f"⚠️ Poucos trades no histórico — backtest sem significância estatística "
+                   f"(DSR {dsr_ativo:.1f}%). Os sinais existem, mas trate com cautela extra.")
     st.caption(
         f"Parâmetros em uso: rápida={params['media_rapida']} · lenta={params['media_lenta']} · "
         f"filtro={params['media_filtro']} · ATR={params['atr_periodo']}×{params['atr_multiplicador']} · "
