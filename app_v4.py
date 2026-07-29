@@ -34,7 +34,14 @@ import pandas as pd
 import altair as alt
 import streamlit as st
 
-from config_v4 import CANDLES_POR_DIA, carregar_dados, separar_periodos, classificar_liquidez
+from config_v4 import (
+    CANDLES_POR_DIA,
+    CAPITAL_INICIAL,
+    ATIVOS_LIQUIDOS,
+    carregar_dados,
+    separar_periodos,
+    classificar_liquidez,
+)
 from otimizador_v4 import executar_backtest_v4
 
 st.set_page_config(page_title="Estratégia V4 - Radar & Portfólio", layout="wide", page_icon="📡")
@@ -54,6 +61,22 @@ COR_LIQUIDO = "#3b82f6"
 COR_MENOS_LIQUIDO = "#a855f7"
 COR_ESTRATEGIA = "#34d399"
 COR_BUYHOLD = "#fbbf24"
+
+# ----------------------------------------------------------------------------
+# RECEITA "OURO ROBUSTA" por grupo (derivada em estrategia_ouro_v5.py +
+# analise_padroes_profunda.py: moda do corte de 5% por Score_Robustez, no DEV).
+# NÃO é a que a otimização usa por ativo — é uma receita ÚNICA por grupo, pra
+# comparar lado a lado com o otimizado. Ver RELATORIO_ESTRATEGIA_OURO.md.
+#   veterana = ativos líquidos/antigos (ATIVOS_LIQUIDOS); nova = o resto.
+# ----------------------------------------------------------------------------
+RECEITA_ROBUSTA = {
+    "veterana": dict(media_rapida=5, media_lenta=100, media_filtro=50, atr_periodo=7, atr_multiplicador=6.0),
+    "nova": dict(media_rapida=12, media_lenta=30, media_filtro=100, atr_periodo=20, atr_multiplicador=5.0),
+}
+
+
+def grupo_ouro(ativo: str) -> str:
+    return "veterana" if ativo in ATIVOS_LIQUIDOS else "nova"
 
 # ----------------------------------------------------------------------------
 # CSS - tema escuro tipo dashboard (o base=dark já vem de .streamlit/config.toml)
@@ -266,6 +289,49 @@ def curva_capital(ativo: str, interval_str: str, params: dict, taxa: float, slip
         resultados[nome] = df_curva.resample("1D").last().dropna()
 
     return resultados.get("dev"), resultados.get("holdout")
+
+
+@st.cache_data(ttl=1800)
+def curva_capital_intervalo(ativo: str, interval_str: str, params: dict, taxa: float,
+                            slippage: float, data_inicio, data_fim):
+    """Curva de capital + métricas recalculadas SOMENTE na janela [data_inicio,
+    data_fim] escolhida no calendário. Os indicadores são calculados sobre o
+    histórico COMPLETO (warm-up), e só a simulação/capital recomeça em 1000 no
+    início da janela — ou seja: "se você tivesse começado a operar a estratégia
+    nesta data, com os indicadores já aquecidos, o que teria acontecido até a
+    data final?". Buy&Hold também recomeça em 1000 no início da janela."""
+    df = carregar_dados(ativo, interval_str)
+    if df.empty:
+        return None, None
+    candles_dia = CANDLES_POR_DIA[interval_str]
+    df_fast = montar_df_fast(df, params)  # warm-up no histórico inteiro
+    datas = pd.to_datetime(df["t_abert"]).reset_index(drop=True)
+    ini_ts = pd.Timestamp(data_inicio)
+    fim_ts = pd.Timestamp(data_fim) + pd.Timedelta(days=1)  # inclui o dia final
+    mask = (datas >= ini_ts) & (datas < fim_ts)
+    idxs = np.where(mask.values)[0]
+    if len(idxs) < 10:
+        return None, None
+    ini, fim = int(idxs[0]), int(idxs[-1]) + 1
+    res = executar_backtest_v4(
+        df_fast, params, ini, fim, taxa, slippage, candles_dia, incluir_equity=True
+    )
+    datas_janela = datas.iloc[ini:fim].reset_index(drop=True)
+    eq = pd.Series(res["equity"], index=datas_janela)
+    preco = df["fechamento"].values[ini:fim]
+    bh = pd.Series(preco / preco[0] * CAPITAL_INICIAL, index=datas_janela)
+    df_curva = pd.DataFrame({"Estrategia": eq, "Buy&Hold": bh}).resample("1D").last().dropna()
+    bh_ret = (preco[-1] / preco[0] - 1) * 100.0
+    metricas = {
+        "retorno_estrategia_%": res["retorno_total_pct"],
+        "retorno_buyhold_%": round(bh_ret, 2),
+        "dd_%": res["drawdown_pct"],
+        "calmar": res["calmar"],
+        "num_trades": res["num_trades"],
+        "data_ini": datas_janela.iloc[0],
+        "data_fim": datas_janela.iloc[-1],
+    }
+    return df_curva, metricas
 
 
 def grafico_area(df: pd.DataFrame, altura: int = 320):
@@ -490,29 +556,108 @@ if ativo_sel is None:
     st.info("Clique em \"Ver detalhes\" em algum card acima pra ver o gráfico de capital.")
 else:
     row = df_resumo[df_resumo["Ativo"] == ativo_sel].iloc[0]
-    params = dict(
+    info_liq = classificar_liquidez(ativo_sel)
+    interval_sel = row["Interval"]
+    grupo_a = grupo_ouro(ativo_sel)
+
+    params_otim = dict(
         media_rapida=int(row["media_rapida_per"]),
         media_lenta=int(row["media_lenta_per"]),
         media_filtro=int(row["media_filtro_tendencia_per"]),
         atr_periodo=int(row["atr_periodo"]),
         atr_multiplicador=float(row["atr_multiplicador"]),
     )
-    info_liq = classificar_liquidez(ativo_sel)
+    params_robusta = RECEITA_ROBUSTA[grupo_a]
 
-    st.subheader(f"{ativo_sel} ({row['Interval']})")
+    st.subheader(f"{ativo_sel} ({interval_sel})")
+
+    # ---- seletor de qual conjunto de parâmetros usar nos gráficos ----
+    fonte = st.radio(
+        "Parâmetros da estratégia",
+        ["Otimizado por ativo", f"Ouro robusta ({grupo_a})"],
+        horizontal=True,
+        help="Otimizado = os melhores parâmetros achados pra ESTE ativo (in-sample, tende a "
+             "inflar). Ouro robusta = uma receita ÚNICA do grupo, derivada do corte robusto — "
+             "menos sujeita a overfitting. Compare os dois no mesmo gráfico.",
+    )
+    usando_robusta = fonte.startswith("Ouro")
+    params = params_robusta if usando_robusta else params_otim
+
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Calmar (dev)", f"{row['Calmar']:.2f}")
-    c2.metric("Sharpe (dev)", f"{row['Sharpe']:.2f}")
-    c3.metric("DSR", f"{row['DSR_%']:.2f}%")
-    c4.metric("Peso no portfólio", f"{pesos_map.get(ativo_sel, float('nan')):.2f}%")
+    if usando_robusta:
+        c1.metric("Grupo", grupo_a)
+        c2.metric("Peso no portfólio", f"{pesos_map.get(ativo_sel, float('nan')):.2f}%")
+        c3.metric("ATR mult", f"{params['atr_multiplicador']}")
+        c4.metric("Lenta/Filtro", f"{params['media_lenta']}/{params['media_filtro']}")
+        st.caption("⚠️ Calmar/Sharpe/DSR do resumo pertencem à versão OTIMIZADA. Aqui você vê a "
+                   "receita única do grupo aplicada a este ativo — julgue pelos números da janela abaixo.")
+    else:
+        c1.metric("Calmar (dev)", f"{row['Calmar']:.2f}")
+        c2.metric("Sharpe (dev)", f"{row['Sharpe']:.2f}")
+        c3.metric("DSR", f"{row['DSR_%']:.2f}%")
+        c4.metric("Peso no portfólio", f"{pesos_map.get(ativo_sel, float('nan')):.2f}%")
     st.caption(
-        f"Parâmetros: rápida={params['media_rapida']} · lenta={params['media_lenta']} · "
-        f"filtro={params['media_filtro']} · ATR={params['atr_periodo']}x{params['atr_multiplicador']} · "
+        f"Parâmetros em uso: rápida={params['media_rapida']} · lenta={params['media_lenta']} · "
+        f"filtro={params['media_filtro']} · ATR={params['atr_periodo']}×{params['atr_multiplicador']} · "
         f"Grupo: {info_liq['grupo']} (taxa {info_liq['taxa']*100:.2f}% + slippage {info_liq['slippage']*100:.3f}%)"
     )
 
+    # ---- Gráfico com CALENDÁRIO (janela personalizada) ----
+    st.markdown("### 🗓️ Janela personalizada (escolha o período)")
+    df_datas = carregar_dados(ativo_sel, interval_sel)
+    if df_datas is None or df_datas.empty:
+        st.info("Sem dados de preço pra este ativo.")
+    else:
+        datas_all = pd.to_datetime(df_datas["t_abert"])
+        dmin, dmax = datas_all.min().date(), datas_all.max().date()
+        periodos_a = separar_periodos(datas_all)
+        default_ini = periodos_a["holdout_inicio"].date() if periodos_a["holdout_inicio"] is not None else dmin
+
+        colcal1, colcal2 = st.columns([2, 1])
+        with colcal1:
+            intervalo = st.date_input(
+                "Período de comparação",
+                value=(default_ini, dmax),
+                min_value=dmin,
+                max_value=dmax,
+                key=f"cal_{ativo_sel}_{usando_robusta}",
+                format="DD/MM/YYYY",
+            )
+        with colcal2:
+            st.caption("Padrão = período de holdout (12 meses fora da amostra). "
+                       "Arraste no calendário pra qualquer janela — tudo recalcula.")
+
+        if isinstance(intervalo, (list, tuple)) and len(intervalo) == 2:
+            data_ini, data_fim = intervalo
+            with st.spinner("Recalculando na janela escolhida..."):
+                df_janela, met = curva_capital_intervalo(
+                    ativo_sel, interval_sel, params, info_liq["taxa"], info_liq["slippage"],
+                    data_ini, data_fim,
+                )
+            if df_janela is None or met is None:
+                st.warning("Janela muito curta pra simular (precisa de pelo menos ~10 candles). Escolha um período maior.")
+            else:
+                m1, m2, m3, m4 = st.columns(4)
+                delta_vs_bh = met["retorno_estrategia_%"] - met["retorno_buyhold_%"]
+                m1.metric("Estratégia (janela)", f"{met['retorno_estrategia_%']:.2f}%",
+                          delta=f"{delta_vs_bh:+.2f}% vs Buy&Hold")
+                m2.metric("Buy & Hold (janela)", f"{met['retorno_buyhold_%']:.2f}%")
+                m3.metric("Drawdown máx", f"{met['dd_%']:.2f}%")
+                m4.metric("Trades", f"{int(met['num_trades'])}")
+                calmar_txt = f"{met['calmar']:.2f}" if met["calmar"] is not None else "—"
+                st.caption(
+                    f"Janela: {met['data_ini'].strftime('%d/%m/%Y')} a {met['data_fim'].strftime('%d/%m/%Y')} "
+                    f"· Calmar {calmar_txt} · indicadores aquecidos com o histórico anterior à janela "
+                    f"(capital recomeça em ${CAPITAL_INICIAL:.0f} no início do período escolhido)."
+                )
+                st.altair_chart(grafico_area(df_janela), use_container_width=True)
+        else:
+            st.info("Escolha as duas datas (início e fim) no calendário acima.")
+
+    # ---- Janelas oficiais fixas (dev | holdout), pra referência ----
+    st.markdown("### Janelas oficiais (referência) — Desenvolvimento vs Holdout")
     with st.spinner("Reconstruindo curvas de capital..."):
-        df_dev, df_holdout = curva_capital(ativo_sel, row["Interval"], params, info_liq["taxa"], info_liq["slippage"])
+        df_dev, df_holdout = curva_capital(ativo_sel, interval_sel, params, info_liq["taxa"], info_liq["slippage"])
 
     col_g1, col_g2 = st.columns(2)
     with col_g1:
@@ -528,13 +673,14 @@ else:
         else:
             st.info("Sem dados de holdout pra este ativo ainda.")
 
-    df_holdout_ativo = carregar_csv(HOLDOUT_POR_ATIVO_CSV)
-    if df_holdout_ativo is not None:
-        linha = df_holdout_ativo[df_holdout_ativo["Ativo"] == ativo_sel]
-        if not linha.empty:
-            l = linha.iloc[0]
-            st.caption(
-                f"Holdout oficial ({l['Periodo_Holdout_Inicio']} a {l['Periodo_Holdout_Fim']}): "
-                f"Estratégia {l['Retorno_Estrategia_TESTE_%']:.2f}% vs Buy&Hold {l['Retorno_BuyHold_TESTE_%']:.2f}% "
-                f"· DD {l['DD_TESTE_%']:.2f}% · {int(l['Num_Trades'])} trades"
-            )
+    if not usando_robusta:
+        df_holdout_ativo = carregar_csv(HOLDOUT_POR_ATIVO_CSV)
+        if df_holdout_ativo is not None:
+            linha = df_holdout_ativo[df_holdout_ativo["Ativo"] == ativo_sel]
+            if not linha.empty:
+                l = linha.iloc[0]
+                st.caption(
+                    f"Holdout oficial ({l['Periodo_Holdout_Inicio']} a {l['Periodo_Holdout_Fim']}): "
+                    f"Estratégia {l['Retorno_Estrategia_TESTE_%']:.2f}% vs Buy&Hold {l['Retorno_BuyHold_TESTE_%']:.2f}% "
+                    f"· DD {l['DD_TESTE_%']:.2f}% · {int(l['Num_Trades'])} trades"
+                )
