@@ -38,6 +38,7 @@ from config_v4 import (
     CANDLES_POR_DIA,
     CAPITAL_INICIAL,
     ATIVOS_LIQUIDOS,
+    ATIVOS_PORTFOLIO_V4,
     carregar_dados,
     separar_periodos,
     classificar_liquidez,
@@ -334,6 +335,100 @@ def curva_capital_intervalo(ativo: str, interval_str: str, params: dict, taxa: f
     return df_curva, metricas
 
 
+# ----------------------------------------------------------------------------
+# PORTFÓLIO DA ESTRATÉGIA OURO ROBUSTA (calculado ao vivo, mesmo motor e mesmos
+# pesos) — substitui a leitura dos CSVs de portfólio, que eram da versão
+# OTIMIZADA por ativo (que decidimos não usar mais). Assim o resumo do topo bate
+# exatamente com os sinais e gráficos, todos na receita robusta por grupo.
+# ----------------------------------------------------------------------------
+def _ret_diario_robusto(ativo: str, interval_str: str):
+    """Retornos diários da estratégia robusta (receita do grupo) em dev e
+    holdout, em fatias separadas — mesmo tratamento do holdout_v4."""
+    params = RECEITA_ROBUSTA[grupo_ouro(ativo)]
+    info_liq = classificar_liquidez(ativo)
+    df = carregar_dados(ativo, interval_str)
+    if df is None or df.empty:
+        return None
+    periodos = separar_periodos(df["t_abert"])
+    idx = periodos["idx_dev_fim"]
+    candles_dia = CANDLES_POR_DIA[interval_str]
+    out = {"dev": None, "holdout": None}
+    for nome, fatia in (("dev", df.iloc[:idx]), ("holdout", df.iloc[idx:])):
+        fatia = fatia.reset_index(drop=True)
+        if len(fatia) < max(params["media_filtro"], 30) + 5:
+            continue
+        df_fast = montar_df_fast(fatia, params)
+        res = executar_backtest_v4(
+            df_fast, params, 0, len(df_fast["fechamento"]),
+            info_liq["taxa"], info_liq["slippage"], candles_dia, incluir_equity=True,
+        )
+        datas = pd.to_datetime(df_fast["t_abert"])
+        eq = pd.Series(res["equity"], index=datas).resample("1D").last().dropna()
+        preco = pd.Series(df_fast["fechamento"], index=datas).resample("1D").last().dropna()
+        out[nome] = {"ret": eq.pct_change().dropna(), "ret_bh": preco.pct_change().dropna(), "res": res}
+    return out
+
+
+def _metricas_portfolio_local(ret_por_ativo: dict, pesos: pd.Series) -> dict:
+    """Combina retornos diários de vários ativos com pesos, na janela comum."""
+    ativos = [a for a in ret_por_ativo if a in pesos.index and len(ret_por_ativo[a]) > 0]
+    if not ativos:
+        return None
+    datas = None
+    for a in ativos:
+        idx = ret_por_ativo[a].index
+        datas = idx if datas is None else datas.intersection(idx)
+    if datas is None or len(datas) < 5:
+        return None
+    datas = datas.sort_values()
+    dfret = pd.DataFrame({a: ret_por_ativo[a].reindex(datas) for a in ativos}).fillna(0.0)
+    p = pesos.reindex(ativos)
+    p = p / p.sum()
+    retp = (dfret * p).sum(axis=1)
+    eq = (1 + retp).cumprod()
+    rt = eq.iloc[-1] - 1.0
+    dias = (datas[-1] - datas[0]).days
+    anos = dias / 365.25 if dias > 0 else None
+    ra = (1 + rt) ** (1 / anos) - 1 if anos and anos > 0 else None
+    dd = ((eq.cummax() - eq) / eq.cummax()).max()
+    calmar = ra / dd if (dd and dd > 0 and ra is not None) else None
+    return {
+        "ret_total_%": round(rt * 100, 2),
+        "ret_anual_%": round(ra * 100, 2) if ra is not None else None,
+        "dd_%": round(dd * 100, 2),
+        "calmar": round(calmar, 3) if calmar is not None else None,
+        "ini": datas[0], "fim": datas[-1], "n_dias": len(datas), "n_ativos": len(ativos),
+    }
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def resumo_portfolio_robusto():
+    """Métricas de portfólio da estratégia ouro robusta: DEV só veteranas (janela
+    longa, ~5 anos, a mais confiável) e HOLDOUT com os 22 (12 meses fora da
+    amostra). Pesos de portfolio_v4_pesos.csv."""
+    df_p = carregar_csv(PESOS_CSV)
+    if df_p is None:
+        return None
+    pesos = df_p.set_index("Ativo")["Peso_Portfolio_%"] / 100.0
+    ret_dev_vet, ret_dev_vet_bh, ret_hold, ret_hold_bh = {}, {}, {}, {}
+    for ativo, interval in ATIVOS_PORTFOLIO_V4.items():
+        r = _ret_diario_robusto(ativo, interval)
+        if r is None:
+            continue
+        if r["dev"] and grupo_ouro(ativo) == "veterana":
+            ret_dev_vet[ativo] = r["dev"]["ret"]
+            ret_dev_vet_bh[ativo] = r["dev"]["ret_bh"]
+        if r["holdout"]:
+            ret_hold[ativo] = r["holdout"]["ret"]
+            ret_hold_bh[ativo] = r["holdout"]["ret_bh"]
+    return {
+        "dev_vet": _metricas_portfolio_local(ret_dev_vet, pesos),
+        "dev_vet_bh": _metricas_portfolio_local(ret_dev_vet_bh, pesos),
+        "hold": _metricas_portfolio_local(ret_hold, pesos),
+        "hold_bh": _metricas_portfolio_local(ret_hold_bh, pesos),
+    }
+
+
 def grafico_area(df: pd.DataFrame, altura: int = 320):
     """Gráfico de área empilhada=NÃO (overlay), com preenchimento semi-
     transparente sob a linha — uma cor pra Estratégia, outra pra Buy&Hold."""
@@ -388,16 +483,15 @@ def formatar_preco(v: float) -> str:
 # ----------------------------------------------------------------------------
 # UI
 # ----------------------------------------------------------------------------
-st.title("📡 Estratégia V4 — Radar de Sinais & Portfólio")
+st.title("📡 Estratégia Ouro Robusta — Radar de Sinais & Portfólio")
 st.caption(
     "Entrada = cruzamento de médias + filtro de tendência · Saída = stop ATR fixo OU cruzamento "
-    "contrário (lógica do v2/v4 — não o trailing stop do v3, que foi descartado)."
+    "contrário. Sinais, gráficos e portfólio usam a **receita robusta por grupo** (veterana/nova) "
+    "— não os parâmetros otimizados por ativo, que se mostraram overfitting."
 )
 
 df_resumo = carregar_csv(RESUMO_CSV)
 df_pesos = carregar_csv(PESOS_CSV)
-df_portfolio_dev = carregar_csv(PORTFOLIO_DEV_CSV)
-df_portfolio_holdout = carregar_csv(PORTFOLIO_HOLDOUT_CSV)
 
 if df_resumo is None:
     st.error(f"Não encontrei {RESUMO_CSV}. Rode `python otimizador_v4.py` primeiro.")
@@ -407,46 +501,54 @@ pesos_map = {}
 if df_pesos is not None:
     pesos_map = df_pesos.set_index("Ativo")["Peso_Portfolio_%"].to_dict()
 
-# ---- Resumo do portfólio no topo ----
-st.header("Resumo do Portfólio")
+# ---- Resumo do portfólio no topo (ESTRATÉGIA OURO ROBUSTA, calculado ao vivo) ----
+st.header("Resumo do Portfólio — Estratégia Ouro Robusta")
+st.caption(
+    "Receita robusta por grupo (veterana nas líquidas/antigas, nova nas recentes) — "
+    "não os parâmetros otimizados por ativo. Mesmos números que os sinais e gráficos abaixo."
+)
+
+with st.spinner("Calculando portfólio da estratégia robusta..."):
+    resumo_rob = resumo_portfolio_robusto()
+
 col_dev, col_holdout = st.columns(2)
 
 with col_dev:
-    st.subheader("📈 Período de Desenvolvimento")
-    st.caption("Onde os parâmetros foram escolhidos — não é validação fora da amostra.")
-    if df_portfolio_dev is not None and not df_portfolio_dev.empty:
-        r = df_portfolio_dev.iloc[0]
+    st.subheader("📈 Desenvolvimento (veteranas, ~5 anos)")
+    st.caption("Janela longa e confiável das 8 líquidas/antigas. A receita foi derivada aqui — não é validação cega.")
+    m = resumo_rob["dev_vet"] if resumo_rob else None
+    m_bh = resumo_rob["dev_vet_bh"] if resumo_rob else None
+    if m is not None:
         c1, c2, c3 = st.columns(3)
-        c1.metric("Retorno Anualizado", f"{r['Retorno_Anualizado_%']:.2f}%")
-        c2.metric("Drawdown Máximo", f"{r['DD_%']:.2f}%")
-        c3.metric("Calmar", f"{r['Calmar_Portfolio']:.3f}")
-        st.caption(f"Período comum: {r['Periodo_Comum_Inicio']} a {r['Periodo_Comum_Fim']} ({int(r['N_Dias_Comuns'])} dias, {int(r['N_Ativos'])} ativos)")
+        c1.metric("Retorno Anualizado", f"{m['ret_anual_%']:.2f}%")
+        c2.metric("Drawdown Máximo", f"{m['dd_%']:.2f}%")
+        c3.metric("Calmar", f"{m['calmar']:.3f}")
+        bh_txt = (f" · Buy&Hold: {m_bh['ret_anual_%']:.1f}% anual, DD {m_bh['dd_%']:.1f}%, Calmar {m_bh['calmar']}"
+                  if m_bh is not None else "")
+        st.caption(f"{m['ini'].date()} a {m['fim'].date()} ({m['n_dias']} dias, {m['n_ativos']} veteranas){bh_txt}")
     else:
-        st.info(f"Rode `python portfolio_v4.py` pra gerar {PORTFOLIO_DEV_CSV}.")
+        st.info("Sem dados suficientes pra compor o portfólio de desenvolvimento.")
 
 with col_holdout:
     st.subheader("🔒 Holdout — VALIDAÇÃO REAL (mercado de baixa)")
-    st.caption("Últimos 12 meses, nunca vistos pelo otimizador. Mede proteção de capital, não captura de alta.")
-    if df_portfolio_holdout is not None and not df_portfolio_holdout.empty:
-        linha_estrategia = df_portfolio_holdout[df_portfolio_holdout["Versao"] == "Estrategia_V4"].iloc[0]
-        linha_bh = df_portfolio_holdout[df_portfolio_holdout["Versao"] == "Buy&Hold"].iloc[0]
+    st.caption("Últimos 12 meses, nunca vistos na derivação da receita. Mede proteção de capital, não captura de alta.")
+    m = resumo_rob["hold"] if resumo_rob else None
+    m_bh = resumo_rob["hold_bh"] if resumo_rob else None
+    if m is not None and m_bh is not None:
         c1, c2, c3 = st.columns(3)
         c1.metric(
             "Retorno Anualizado",
-            f"{linha_estrategia['Retorno_Anualizado_%']:.2f}%",
-            delta=f"{linha_estrategia['Retorno_Anualizado_%'] - linha_bh['Retorno_Anualizado_%']:.2f}% vs Buy&Hold",
+            f"{m['ret_anual_%']:.2f}%",
+            delta=f"{m['ret_anual_%'] - m_bh['ret_anual_%']:.2f}% vs Buy&Hold",
         )
-        c2.metric("Drawdown Máximo", f"{linha_estrategia['DD_%']:.2f}%")
-        c3.metric("Calmar", f"{linha_estrategia['Calmar_Portfolio']:.3f}")
+        c2.metric("Drawdown Máximo", f"{m['dd_%']:.2f}%")
+        c3.metric("Calmar", f"{m['calmar']:.3f}")
         st.caption(
-            f"Buy&Hold no mesmo período: {linha_bh['Retorno_Anualizado_%']:.2f}% anualizado, "
-            f"DD {linha_bh['DD_%']:.2f}% · {linha_estrategia['Periodo_Comum_Inicio']} a {linha_estrategia['Periodo_Comum_Fim']}"
+            f"Buy&Hold no mesmo período: {m_bh['ret_anual_%']:.2f}% anualizado, "
+            f"DD {m_bh['dd_%']:.2f}% · {m['ini'].date()} a {m['fim'].date()} ({m['n_ativos']} ativos)"
         )
     else:
-        st.warning(
-            "Holdout ainda não validado nesta pasta. Rode `python holdout_v4.py "
-            "--eu-confirmo-holdout-final` quando decidir fazer a validação final."
-        )
+        st.info("Sem dados de holdout pra compor o portfólio.")
 
 st.divider()
 
@@ -460,17 +562,13 @@ st.caption(
 if "ativo_selecionado" not in st.session_state:
     st.session_state["ativo_selecionado"] = None
 
-# pré-computa sinal de todos os ativos pra poder ordenar os cards por data
+# pré-computa sinal de todos os ativos pra poder ordenar os cards por data.
+# Os sinais usam a RECEITA OURO ROBUSTA do grupo do ativo (veterana/nova) — NÃO
+# os parâmetros otimizados por ativo, que decidimos não confiar (overfitting).
 cartoes = []
 for _, row in df_resumo.iterrows():
     ativo = row["Ativo"]
-    params = dict(
-        media_rapida=int(row["media_rapida_per"]),
-        media_lenta=int(row["media_lenta_per"]),
-        media_filtro=int(row["media_filtro_tendencia_per"]),
-        atr_periodo=int(row["atr_periodo"]),
-        atr_multiplicador=float(row["atr_multiplicador"]),
-    )
+    params = RECEITA_ROBUSTA[grupo_ouro(ativo)]
     sinal = calcular_sinal(ativo, row["Interval"], params)
     cartoes.append({"row": row, "params": params, "sinal": sinal})
 
@@ -509,10 +607,9 @@ for bloco in blocos:
                         f'<span style="color:#94a3b8;">(faltam {distancia_pct:.2f}% de queda a partir de agora pra atingi-lo)</span></div>'
                     )
 
-                dsr_pct = row["DSR_%"]
                 grupo_liquido = row["Grupo_Liquidez"] == "liquido"
                 cor_grupo = COR_LIQUIDO if grupo_liquido else COR_MENOS_LIQUIDO
-                texto_grupo = "💧 Líquido" if grupo_liquido else "🪙 Menos líquido"
+                texto_grupo = "💧 Veterana" if grupo_liquido else "🪙 Nova"
                 peso = pesos_map.get(ativo)
 
                 html = f"""
@@ -526,18 +623,15 @@ for bloco in blocos:
                     </div>
                     <div class="meta-sinal">sinal desde {data_txt} · preço no sinal: {formatar_preco(sinal["preco_sinal"]) if sinal["preco_sinal"] else "—"}</div>
                     {stop_html}
-                    <div class="stats-row">
-                        <b>Calmar:</b> {row['Calmar']:.2f} &nbsp;·&nbsp; <b>DSR:</b> {dsr_pct:.2f}%
-                    </div>
-                    <div style="margin-top:6px;">
+                    <div style="margin-top:8px;">
                         {chip_html(texto_grupo, cor_grupo)}
                         {chip_html(f"peso {peso:.2f}%" if peso is not None else "peso n/d", "#64748b")}
                     </div>
                 """
-                if pd.notna(dsr_pct) and dsr_pct < DSR_ALERTA_LIMITE:
+                if not grupo_liquido:
                     html += f"""
                     <div class="dsr-aviso" style="background:{COR_DSR_ALERTA}22; color:{COR_DSR_ALERTA}; border:1px solid {COR_DSR_ALERTA}55;">
-                        ⚠️ Histórico curto — tratar com cautela
+                        ⚠️ Moeda nova — sinal menos confiável (quase nenhuma passa no teste estatístico)
                     </div>
                     """
                 html += "</div>"
@@ -559,43 +653,18 @@ else:
     info_liq = classificar_liquidez(ativo_sel)
     interval_sel = row["Interval"]
     grupo_a = grupo_ouro(ativo_sel)
+    params = RECEITA_ROBUSTA[grupo_a]
 
-    params_otim = dict(
-        media_rapida=int(row["media_rapida_per"]),
-        media_lenta=int(row["media_lenta_per"]),
-        media_filtro=int(row["media_filtro_tendencia_per"]),
-        atr_periodo=int(row["atr_periodo"]),
-        atr_multiplicador=float(row["atr_multiplicador"]),
-    )
-    params_robusta = RECEITA_ROBUSTA[grupo_a]
-
-    st.subheader(f"{ativo_sel} ({interval_sel})")
-
-    # ---- seletor de qual conjunto de parâmetros usar nos gráficos ----
-    fonte = st.radio(
-        "Parâmetros da estratégia",
-        ["Otimizado por ativo", f"Ouro robusta ({grupo_a})"],
-        horizontal=True,
-        help="Otimizado = os melhores parâmetros achados pra ESTE ativo (in-sample, tende a "
-             "inflar). Ouro robusta = uma receita ÚNICA do grupo, derivada do corte robusto — "
-             "menos sujeita a overfitting. Compare os dois no mesmo gráfico.",
-    )
-    usando_robusta = fonte.startswith("Ouro")
-    params = params_robusta if usando_robusta else params_otim
+    st.subheader(f"{ativo_sel} ({interval_sel}) — Estratégia Ouro Robusta ({grupo_a})")
 
     c1, c2, c3, c4 = st.columns(4)
-    if usando_robusta:
-        c1.metric("Grupo", grupo_a)
-        c2.metric("Peso no portfólio", f"{pesos_map.get(ativo_sel, float('nan')):.2f}%")
-        c3.metric("ATR mult", f"{params['atr_multiplicador']}")
-        c4.metric("Lenta/Filtro", f"{params['media_lenta']}/{params['media_filtro']}")
-        st.caption("⚠️ Calmar/Sharpe/DSR do resumo pertencem à versão OTIMIZADA. Aqui você vê a "
-                   "receita única do grupo aplicada a este ativo — julgue pelos números da janela abaixo.")
-    else:
-        c1.metric("Calmar (dev)", f"{row['Calmar']:.2f}")
-        c2.metric("Sharpe (dev)", f"{row['Sharpe']:.2f}")
-        c3.metric("DSR", f"{row['DSR_%']:.2f}%")
-        c4.metric("Peso no portfólio", f"{pesos_map.get(ativo_sel, float('nan')):.2f}%")
+    c1.metric("Grupo", grupo_a)
+    c2.metric("Peso no portfólio", f"{pesos_map.get(ativo_sel, float('nan')):.2f}%")
+    c3.metric("Média lenta / filtro", f"{params['media_lenta']}/{params['media_filtro']}")
+    c4.metric("ATR", f"{params['atr_periodo']}×{params['atr_multiplicador']}")
+    if grupo_a == "nova":
+        st.caption("⚠️ Moeda nova — historicamente pouco confiável (quase nenhuma passa no teste "
+                   "estatístico DSR). Os sinais existem, mas trate com cautela extra.")
     st.caption(
         f"Parâmetros em uso: rápida={params['media_rapida']} · lenta={params['media_lenta']} · "
         f"filtro={params['media_filtro']} · ATR={params['atr_periodo']}×{params['atr_multiplicador']} · "
@@ -620,7 +689,7 @@ else:
                 value=(default_ini, dmax),
                 min_value=dmin,
                 max_value=dmax,
-                key=f"cal_{ativo_sel}_{usando_robusta}",
+                key=f"cal_{ativo_sel}",
                 format="DD/MM/YYYY",
             )
         with colcal2:
@@ -673,14 +742,8 @@ else:
         else:
             st.info("Sem dados de holdout pra este ativo ainda.")
 
-    if not usando_robusta:
-        df_holdout_ativo = carregar_csv(HOLDOUT_POR_ATIVO_CSV)
-        if df_holdout_ativo is not None:
-            linha = df_holdout_ativo[df_holdout_ativo["Ativo"] == ativo_sel]
-            if not linha.empty:
-                l = linha.iloc[0]
-                st.caption(
-                    f"Holdout oficial ({l['Periodo_Holdout_Inicio']} a {l['Periodo_Holdout_Fim']}): "
-                    f"Estratégia {l['Retorno_Estrategia_TESTE_%']:.2f}% vs Buy&Hold {l['Retorno_BuyHold_TESTE_%']:.2f}% "
-                    f"· DD {l['DD_TESTE_%']:.2f}% · {int(l['Num_Trades'])} trades"
-                )
+    st.caption(
+        "As duas janelas acima usam a receita robusta do grupo, com indicadores calculados "
+        "isoladamente em cada período (sem aquecer com o histórico anterior) — por isso podem "
+        "diferir um pouco da janela personalizada do calendário, que aquece os indicadores."
+    )
