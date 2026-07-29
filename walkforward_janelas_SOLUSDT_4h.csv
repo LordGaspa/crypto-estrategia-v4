@@ -1,0 +1,5 @@
+Ativo,Timeframe,Janela,Periodo_Treino,Periodo_Teste,media_rapida_per,media_lenta_per,media_filtro_tendencia_per,atr_periodo,atr_multiplicador,Lucro_Treino_%,Trades_Treino,Lucro_Estrategia_TESTE_%,Lucro_BuyHold_TESTE_%,Trades_TESTE,DD_TESTE_%
+SOLUSDT,4h,1,2020-08-11 a 2022-12-31,2023-01-01 a 2023-12-31,14,150,150,20,0.5,8366.08,28,-17.9,920.26,11,18.87
+SOLUSDT,4h,2,2020-08-11 a 2023-12-31,2024-01-01 a 2024-12-31,12,200,250,5,1.5,29339.79,24,21.98,86.11,6,21.27
+SOLUSDT,4h,3,2020-08-11 a 2024-12-31,2025-01-01 a 2025-12-31,10,200,250,14,3.0,48809.87,35,31.57,-34.16,7,25.54
+SOLUSDT,4h,4,2020-08-11 a 2025-12-31,2026-01-01 a 2026-07-28,10,200,250,14,3.0,64251.91,42,-11.41,-41.38,3,11.41
