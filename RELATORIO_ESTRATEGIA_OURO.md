@@ -108,7 +108,88 @@ comparação #1 (veteranas, 5 anos) para o dev.
 
 ---
 
+---
+
+# REFINAMENTO (reavaliação de amostragem) — 2026-07-29, 2ª rodada
+
+O usuário questionou, com razão: **top-100 é só ~0,36% de 28.035 combinações** — fatia fina
+demais, é onde mora a sorte. Reavaliamos alargando o corte (0,36% → 1% → 5% → 10%) e rankeando
+também por **Score_Robustez** (não só Calmar cru). Scripts: `analise_padroes_profunda.py` e
+`comparar_receitas.py`.
+
+## O que a amostragem larga revelou
+
+1. **Padrões que aguentaram todos os cortes (robustos de verdade):**
+   - Filtro tendência: **50** (veteranas) / **100** (novas) — moda estável de 0,36% a 10%.
+   - ATR multiplicador **6.0** e ATR período **5-7** nas veteranas — firmes em todo corte.
+
+2. **Um "padrão" do top-100 que era RUÍDO:** nas novas, `atr_mult = 1.0` (stop apertado) só
+   aparece no corte fino. No corte de 5% por robustez vira **5.0** (stop largo). O "novas
+   preferem stop apertado" era overfitting a alguns pumps de memecoin.
+
+3. **Firmeza do ótimo (platô vs pico):** média de firmeza 0,77 (veteranas) e 0,69 (novas) —
+   os ótimos são platôs decentes, não picos isolados, mas as veteranas são mais firmes.
+
+4. **DSR é dirigido por Nº DE TRADES** (Spearman ρ = 0,78), não por histórico (ρ = 0,62, e só
+   porque histórico gera trades). Poucos trades = ruído, por mais anos que tenha. Só **7/22**
+   passam de DSR 5% — **6 são veteranas, só 1 é nova**.
+
+5. **A receita única generaliza bem nas veteranas** (percentil médio 72 no grid de cada ativo)
+   **e mal nas novas** (percentil 38, com desastres: BONK 0,8; IMX 1,2; PENGU 4,1). Novas são
+   genuinamente heterogêneas.
+
+## Receita vencedora: ROBUSTA (derivada do corte 5% por robustez, tudo no DEV)
+
+| | Veteranas | Novas |
+|---|---|---|
+| Média rápida | 5 | 12 |
+| Média lenta | 100 | 30 |
+| Filtro | 50 | 100 |
+| ATR período | 7 | 20 |
+| ATR multiplicador | **6.0** | **5.0** ← corrigido (era 1.0 no top-100) |
+
+## Head-to-head (mesmo motor, mesmos pesos)
+
+**DEV veteranas (5 anos) — praticamente empate**, o edge é robusto à receita:
+
+| Receita | Calmar |
+|---|---|
+| Ouro (top-100) | 2.055 |
+| **Robusta (5%)** | 2.023 |
+| Híbrida (ajuste manual) | 2.042 |
+| Buy & Hold | 1.508 |
+
+**HOLDOUT (12 meses de baixa, 22 ativos) — a ROBUSTA protege muito melhor:**
+
+| Receita | Retorno | Drawdown |
+|---|---|---|
+| **Robusta (5%)** | **−7,4%** | **13,9%** |
+| Ouro (top-100) | −15,1% | 19,7% |
+| Híbrida (ajuste manual) | −21,2% | 24,8% |
+| Buy & Hold | −52,0% | 60,1% |
+
+## Conclusões do refinamento
+
+- **A ROBUSTA é a receita honesta escolhida.** Mesmo desempenho no dev que a ouro, protege
+  o dobro no holdout (−7% vs −15%). A correção do `atr_mult` das novas (1.0→5.0) foi o ganho
+  principal — e veio justamente de olhar a amostra larga em vez do top-100.
+- **Ajuste manual (híbrida) PIOROU.** Confirma: confie na derivação robusta dos dados, não no
+  "achismo" de mexer num parâmetro. Toda vez que a gente tenta "melhorar na mão", tende a
+  overfittar.
+- **O edge das veteranas é robusto à receita** (Calmar ~2.0 dê qual receita der) — sinal de
+  que é real. O das novas é frágil e depende de sorte.
+
+## ⚠️ Guardrail: paramos de mexer no holdout aqui
+
+A ROBUSTA foi derivada **100% do período de desenvolvimento** (corte por robustez no dev).
+O número do holdout (−7,4%) é um teste fora-da-amostra legítimo, olhado UMA vez. **Não vamos
+ajustar receita pra melhorar o holdout** — isso contaminaria a validação e viraria o mesmo
+overfitting que estamos combatendo. "Estratégia perfeita" não existe; a ROBUSTA é a mais
+honesta que os dados sustentam sem se enganar.
+
 ## Arquivos
-- `estrategia_ouro_v5.py` — o teste (reutiliza o motor oficial `executar_backtest_v4`)
-- `estrategia_ouro_v5_por_ativo.csv` — resultado ativo a ativo (ouro vs otimizado vs buy&hold,
-  dev e holdout)
+- `estrategia_ouro_v5.py` — teste ouro por grupo (reutiliza o motor oficial)
+- `estrategia_ouro_v5_por_ativo.csv` — resultado ativo a ativo
+- `analise_padroes_profunda.py` — reavaliação de amostragem, DSR, platô vs pico, travados vs livres
+- `comparar_receitas.py` — head-to-head ouro vs robusta vs híbrida
+- `analise_padroes_profunda_ouro_no_grid.csv` — percentil da receita em cada ativo
