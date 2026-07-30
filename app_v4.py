@@ -164,6 +164,16 @@ def carregar_resumo_filter():
         return None
 
 
+@st.cache_data
+def carregar_fronteira():
+    """Tabela comparativa Baseline / Vol-target / BTC-Filtrado / BTC-Agressivo."""
+    try:
+        df = pd.read_csv("fronteira_modos_v4.csv")
+        return df[df["Estrategia"] != "BTC-Defensivo"].reset_index(drop=True)
+    except FileNotFoundError:
+        return None
+
+
 # ----------------------------------------------------------------------------
 # SINAL ATUAL - mesma lógica de entrada/saída do v4 (cruzamento + filtro +
 # stop ATR fixo OU cruzamento contrário), calculada localmente pra saber se a
@@ -712,6 +722,33 @@ with st.expander("📊 Validação Multi-Regime — o que a estratégia faz bem 
 **Slippage realista:** saídas de stop recebem slippage extra (5% do ATR para líquidas, 25% para ilíquidas). Impacto no portfólio ponderado: −3.1pp/ano, −6% no Calmar (+57.6%/ano, Calmar 1.091). A proteção em BEAR se sustenta — a estratégia sai geralmente por cruzamento (antes do crash), não por stop (em queda livre).
             """.strip()
         )
+
+        # Fronteira de modos — tabela comparativa
+        df_front = carregar_fronteira()
+        if df_front is not None:
+            st.markdown("#### Fronteira de modos — resumo comparativo")
+            notas = {
+                "BTC-Agressivo":    "↑↑ retorno · ↑↑ DD · leverage 1.5× em BULL BTC",
+                "Vol-target R=15%": "= retorno · ↓↓ DD · melhor Sharpe · sizing pelo ATR",
+                "BTC-Filtrado":     "↑ retorno moderado · ↓ DD · proteção em BEAR BTC sem leverage",
+                "Baseline":         "referência — 100% do capital em cada trade",
+            }
+            df_disp = df_front.copy()
+            df_disp["Ret/ano"] = df_disp["ret_anual_pct"].apply(lambda x: f"+{x:.1f}%")
+            df_disp["Drawdown"] = df_disp["drawdown_pct"].apply(lambda x: f"{x:.1f}%")
+            df_disp["Calmar"] = df_disp["calmar"].apply(lambda x: f"{x:.3f}")
+            df_disp["Sharpe"] = df_disp["sharpe"].apply(lambda x: f"{x:.3f}")
+            df_disp["Perfil"] = df_disp["Estrategia"].map(notas).fillna("")
+            st.dataframe(
+                df_disp[["Estrategia", "Ret/ano", "Drawdown", "Calmar", "Sharpe", "Perfil"]].set_index("Estrategia"),
+                use_container_width=True,
+            )
+            st.caption(
+                "Vol-target e BTC-filter testados separadamente — não existe backtest da combinação dos dois. "
+                "Período de desenvolvimento (antes do holdout lacrado), médias ponderadas pelos 22 ativos. "
+                "BTC-Agressivo e Vol-target R=15% têm Calmar quase idêntico mas perfis opostos: "
+                "um dá mais retorno com mais DD, o outro dá o mesmo retorno com menos DD."
+            )
 
         # Gráfico de distribuição
         st.markdown("#### Distribuição dos retornos anuais (estratégia vs B&H)")

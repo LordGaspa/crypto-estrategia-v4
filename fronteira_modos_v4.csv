@@ -1,0 +1,6 @@
+Estrategia,ret_anual_pct,drawdown_pct,calmar,sharpe
+BTC-Agressivo,79.7,68.7,1.316,0.938
+Vol-target R=15%,61.4,55.5,1.314,0.963
+BTC-Filtrado,62.7,58.5,1.219,0.909
+BTC-Defensivo,60.7,62.3,1.158,0.886
+Baseline,60.7,62.3,1.158,0.886

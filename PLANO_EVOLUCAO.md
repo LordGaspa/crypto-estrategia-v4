@@ -75,7 +75,7 @@ fraqueza a atacar na Fase 2.
 
 ## Fase 2 — Busca honesta por MAIS RETORNO ✅ CONCLUÍDA (2026-07-29)
 
-*Três alavancas testadas — resultados honestos abaixo.*
+*Quatro alavancas testadas — resultados honestos abaixo.*
 
 - [x] **Alavanca A — Trailing Stop DESCARTADO:** testado nas 115 janelas (script `trailing_teste_v4.py`).
   EQUILIBRADO (ativa 1.5× risco, trail ATR×3.0) piorou em TODOS os regimes:
@@ -111,15 +111,17 @@ fraqueza a atacar na Fase 2.
   R=20%+ melhora mais o portfólio ponderado mas aumenta drawdown acima do baseline.
   **Conclusão: R=15% é o ponto ótimo para quem quer melhorar risco-retorno sem mais drawdown.**
 
-- [ ] **Fronteira completa no app:** expor Baseline / Vol-target R=15% / BTC-Filtrado /
-  BTC-Agressivo com métricas honestas de cada combinação.
+- [x] **Fronteira completa no app:** tabela comparativa Baseline / Vol-target R=15% /
+  BTC-Filtrado / BTC-Agressivo no expander de Validação Multi-Regime. CSV pré-computado
+  `fronteira_modos_v4.csv` (gerado por `gerar_resumo_vol.py`). Inclui coluna "Perfil" com
+  o trade-off de cada modo em linguagem direta.
 
 **Entrega completa Fase 2:** trailing DESCARTADO (Alavanca A), vol-targeting CONCLUÍDO com
 R_ótimo=15% (Alavanca B), filtro BTC CONCLUÍDO com re-backtest real (Alavanca C).
 
 ---
 
-## Fase 3 — Produto e realismo (mecânica A− → A+; deploy robusto) ✅ PARCIAL (2026-07-29)
+## Fase 3 — Produto e realismo (mecânica A− → A+; deploy robusto) ✅ CONCLUÍDA (exceto deploy) (2026-07-29)
 
 - [x] **Re-backtest real com sizes dinâmicos:** `backtest_btc_filter_v4.py` implementa o filtro
   de regime BTC como sizing dinâmico real por trade (não escalamento de retornos). Cada trade
