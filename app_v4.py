@@ -155,6 +155,15 @@ def carregar_csv(caminho):
     return pd.read_csv(caminho)
 
 
+@st.cache_data
+def carregar_resumo_filter():
+    """Métricas do re-backtest real com sizes dinâmicos por regime BTC."""
+    try:
+        return pd.read_csv("backtest_btc_filter_v4_resumo_ponderado.csv").set_index("Modo")
+    except FileNotFoundError:
+        return None
+
+
 # ----------------------------------------------------------------------------
 # SINAL ATUAL - mesma lógica de entrada/saída do v4 (cruzamento + filtro +
 # stop ATR fixo OU cruzamento contrário), calculada localmente pra saber se a
@@ -541,11 +550,12 @@ def regime_btc_atual():
 
 
 regime_btc, ret_btc_12m, preco_btc = regime_btc_atual()
+resumo_filter = carregar_resumo_filter()
 
 st.subheader("🧭 Modo de Alocação — Filtro de Regime BTC")
 st.caption(
     "Com base no retorno do BTC nos últimos 12 meses, ajuste o tamanho das suas posições. "
-    "Simulação histórica: Defensivo $81K → Agressivo $380K (mesmo período de dev, 8 anos)."
+    "Métricas históricas: re-backtest real com sizes dinâmicos por trade (período de desenvolvimento)."
 )
 
 if regime_btc is not None:
@@ -556,14 +566,28 @@ if regime_btc is not None:
     emoji_regime= "🐂" if regime_btc == "BULL" else ("🐻" if regime_btc == "BEAR" else "↔️")
     btc_txt     = f"BTC/USDT ${preco_btc:,.0f} · retorno 12m: {ret_btc_12m:+.1f}%"
 
+    def _hist_str(nome_modo):
+        """Retorna string de métricas históricas do modo a partir do CSV pré-computado."""
+        if resumo_filter is None:
+            return "Execute backtest_btc_filter_v4.py para ver métricas históricas."
+        try:
+            r = resumo_filter.loc[nome_modo]
+            return (
+                f"Dev (ponderado): +{r['ret_anual_pct']:.1f}%/ano"
+                f"  ·  DD: {r['drawdown_pct']:.1f}%"
+                f"  ·  Calmar: {r['calmar']:.3f}"
+            )
+        except KeyError:
+            return ""
+
     modos = [
         {
             "nome": "🛡️ Defensivo",
             "multiplicador": "1× (sem mudança)",
-            "descricao": "Sempre usa 100% dos pesos calculados. A receita atual.",
+            "descricao": "Sempre usa 100% dos pesos calculados. Linha de base.",
             "ativo_em": ["BULL", "LATERAL", "BEAR"],
             "cor": "#64748b",
-            "hist": "Mediana/janela: +15%  ·  Simulação dev: ~$81K",
+            "hist": _hist_str("DEFENSIVO"),
         },
         {
             "nome": "⚖️ Filtrado",
@@ -571,15 +595,15 @@ if regime_btc is not None:
             "descricao": "Em anos BEAR do BTC, metade do capital fica em cash.",
             "ativo_em": ["BULL", "LATERAL", "BEAR"],
             "cor": "#3b82f6",
-            "hist": "Mediana/janela: +15%  ·  Simulação dev: ~$109K  (+35%)",
+            "hist": _hist_str("FILTRADO"),
         },
         {
             "nome": "🚀 Agressivo",
             "multiplicador": "1.5× (BULL BTC) · 1× (LATERAL) · 0.5× (BEAR BTC)",
-            "descricao": "Aumenta exposure em BULL, reduz em BEAR. Mais retorno, mais drawdown.",
+            "descricao": "Mais retorno em BULL, proteção em BEAR. Drawdown maior.",
             "ativo_em": ["BULL", "LATERAL", "BEAR"],
             "cor": "#a855f7",
-            "hist": "Mediana/janela: +22.5%  ·  Simulação dev: ~$380K  (+370%)",
+            "hist": _hist_str("AGRESSIVO"),
         },
     ]
 
@@ -614,10 +638,16 @@ if regime_btc is not None:
                 unsafe_allow_html=True,
             )
 
-    st.caption(
-        "⚠️ Simulação histórica = retornos da Fase 1 (walk-forward dev) escalados por fator de posição. "
-        "Não é um backtest com sizes dinâmicos reais — é orientativo. Valide antes de aplicar capital real."
-    )
+    if resumo_filter is not None:
+        st.caption(
+            "📈 Re-backtest real (backtest_btc_filter_v4.py): cada trade é dimensionado pelo regime BTC "
+            "no momento da abertura — sem look-ahead. Métricas = médias ponderadas pelos pesos do portfólio, "
+            "período de desenvolvimento. Calmar = retorno anualizado / drawdown máximo."
+        )
+    else:
+        st.caption(
+            "Execute backtest_btc_filter_v4.py para ver métricas históricas reais de cada modo."
+        )
 else:
     st.info("Não foi possível calcular o regime BTC atual (sem conexão com a API).")
 
@@ -675,7 +705,7 @@ with st.expander("📊 Validação Multi-Regime — o que a estratégia faz bem 
 
 **O que o trailing stop mostrou:** testado nas mesmas janelas, o trailing stop **piorou** em todos os regimes (−50pp em BULL). O cruzamento + stop ATR fixo é a saída mais eficiente para esses parâmetros.
 
-**Próximo passo (Fase 2C):** filtro de regime do BTC — em anos BULL do BTC usar 1.5× capital, em anos BEAR usar 0.5×. Simulação sobre os mesmos dados mostrou retorno total $81K → $380K no mesmo período histórico (resultado orientativo, não validado out-of-sample).
+**Filtro de regime BTC (Fase 3 — re-backtest real):** sizes dinâmicos por trade (1.5× BULL / 1× LATERAL / 0.5× BEAR BTC). Re-backtest com sizes reais (sem escalonamento): Agressivo melhora retorno de +60.7%→+79.7%/ano e Calmar de 1.158→1.316 (+14%), mas aceita +6.4pp de drawdown. Resultado concentrado nas veteranas (SOL, DOGE, BNB). Ver cards "Modo de Alocação" acima.
             """.strip()
         )
 

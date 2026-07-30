@@ -103,12 +103,34 @@ mais retorno. O passo concreto é implementar sizes dinâmicos no motor de backt
 
 ---
 
-## Fase 3 — Produto e realismo (mecânica A− → A+; deploy robusto)
+## Fase 3 — Produto e realismo (mecânica A− → A+; deploy robusto) ✅ PARCIAL (2026-07-29)
+
+- [x] **Re-backtest real com sizes dinâmicos:** `backtest_btc_filter_v4.py` implementa o filtro
+  de regime BTC como sizing dinâmico real por trade (não escalamento de retornos). Cada trade
+  é dimensionado pelo regime BTC trailing 12m no momento da abertura — sem look-ahead.
+  Resultados (médias ponderadas pelos pesos do portfólio, período de desenvolvimento):
+
+  | Modo       | Ret/ano | Drawdown | Calmar | Sharpe |
+  |:-----------|--------:|---------:|-------:|-------:|
+  | DEFENSIVO  |  +60.7% |    62.3% |  1.158 |  0.886 |
+  | FILTRADO   |  +62.7% |    58.5% |  1.219 |  0.909 |
+  | AGRESSIVO  |  +79.7% |    68.7% |  1.316 |  0.938 |
+
+  **Descobertas chave:**
+  - O antigo $81K→$380K (+370%) da Fase 2 era artefato de escalar retornos anuais compostos.
+    O re-backtest real mostra +31% de retorno anualizado (60.7%→79.7%) — expressivo, mas honesto.
+  - AGRESSIVO melhora o Calmar em +14% (1.316 vs 1.158) e o retorno anual em +19pp.
+  - Trade-off: +6.4pp de drawdown adicional.
+  - Efeito concentrado nas **veteranas**: SOL (+37.9k%), DOGE (+30.8k%), BNB (+17.5k%) ganham
+    dramaticamente. Novas ficam estáveis ou pioram ligeiramente (sem correlação confiável com BTC).
+  - FILTRADO melhora Calmar (+5%) e REDUZ drawdown (-3.8pp) — proteção sem leverage.
+
+- [x] **App atualizado:** modo de alocação agora exibe métricas do re-backtest real em cada card
+  (ret/ano, DD, Calmar ponderados pelo portfólio). Caption atualizado de "simulação" para
+  "re-backtest real". Função `carregar_resumo_filter()` carrega `backtest_btc_filter_v4_resumo_ponderado.csv`.
 
 - [ ] **Slippage realista:** modelar slippage que piora com a volatilidade/queda (especialmente
   ilíquidas no momento do stop) — para a proteção não ficar superestimada.
-- [ ] **App:** expor a fronteira (Defensivo/Equilibrado/Agressivo), a distribuição OOS e as
-  limitações (viés de sobrevivência, correlação) de forma visível e honesta.
 - [ ] **Deploy** com os guardrails no lugar (Fase 0) — aí você confia no que está no celular.
 
 ---
