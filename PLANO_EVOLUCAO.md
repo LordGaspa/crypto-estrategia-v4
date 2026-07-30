@@ -26,25 +26,26 @@ equilibrado → agressivo), com o número honesto de cada um.
 
 ---
 
-## Fase 0 — Fundação de software (destrava tudo; nota C+ → A/A+)
+## Fase 0 — Fundação de software (destrava tudo; nota C+ → A/A+) ✅ CONCLUÍDA (2026-07-29)
 
 *Não muda nada da estratégia. É o conserto de maior retorno sobre esforço e o pré-requisito de
 segurança para todo o resto.*
 
-- [ ] **Fonte única da verdade da estratégia:** extrair entrada/saída/stop para um módulo novo
-  `estrategia_core.py` (função pura, sem I/O). `executar_backtest_v4` (P&L) e
-  `estado_atual_posicao` (sinal ao vivo) passam a chamar a MESMA função de sinais. Fim da
-  duplicação.
-- [ ] **Config como fonte única de parâmetros:** mover `RECEITA_ROBUSTA` (e recipes futuras) para
-  `config_v4.py`; app/estrategia_ouro/comparar_receitas importam de lá.
-- [ ] **Testes (`pytest`):**
-  - golden-master do motor (entrada fixa → equity/DD/nº trades conhecidos, trava regressão);
-  - **teste de concordância**: para os 22 ativos, o sinal do radar == posição do backtest no
-    último candle (garante que o radar nunca mente);
-  - teste de ausência de look-ahead (deslocar dados no futuro não muda decisão passada).
-- [ ] **Limpeza:** remover constantes/CSVs mortos; um `README`/`Makefile` com "como rodar tudo".
+- [x] **Fonte única da verdade da estratégia:** criado `estrategia_core.py` (funções puras
+  `calcular_sinais`, `simular_posicao`, `estado_posicao_atual`). `executar_backtest_v4` (P&L) e
+  o radar (`estado_atual_posicao`, agora wrapper fino) chamam o MESMO core. Fim da duplicação.
+- [x] **Config como fonte única de parâmetros:** `RECEITA_ROBUSTA` e `grupo_ouro` movidos para
+  `config_v4.py`; app importa de lá. (Scripts de pesquisa comparar_receitas/analise_profunda
+  mantêm variantes locais de propósito — são artefatos de comparação já rodados.)
+- [x] **Testes (`pytest`, 7 passando):** golden-master do motor (valores congelados, trava
+  regressão — confirmou que o refactor não mudou nada); concordância radar vs referência
+  independente; ausência de look-ahead; sinais corretos; simular_posicao vs reimplementação.
+- [x] **Limpeza:** removidas constantes/CSVs mortos do app (PESOS_CSV, PORTFOLIO_*). `requirements-dev.txt` criado.
+- [ ] *(nice-to-have adiado)* centralizar `montar_df_fast` (indicadores) no core — hoje o app já
+  é DRY internamente; só os scripts de pesquisa (holdout/portfolio/ouro) têm cópias próprias.
 
-**Entrega:** confiança de que radar = backtest, e liberdade de mexer na estratégia sem medo.
+**Entregue:** radar e backtest agora compartilham o core — o radar não pode mais divergir do
+que a estratégia testou. Verificado no browser: números idênticos aos de antes do refactor.
 
 ---
 

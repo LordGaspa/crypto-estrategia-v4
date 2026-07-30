@@ -48,6 +48,7 @@ from config_v4 import (
     separar_periodos,
     classificar_liquidez,
 )
+from estrategia_core import calcular_sinais, simular_posicao
 
 warnings.simplefilter(action="ignore", category=FutureWarning)
 
@@ -103,42 +104,34 @@ def executar_backtest_v4(
     if n < 5:
         return vazio
 
-    sinais_compra = np.zeros(n, dtype=bool)
-    sinais_compra[1:] = (
-        (m_rapida[1:] > m_lenta[1:])
-        & (m_rapida[:-1] <= m_lenta[:-1])
-        & (fechamento[1:] > m_filtro[1:])
-    )
-    sinais_venda = np.zeros(n, dtype=bool)
-    sinais_venda[1:] = (m_rapida[1:] < m_lenta[1:]) & (m_rapida[:-1] >= m_lenta[:-1])
+    # Sinais e timeline de posição vêm do MÓDULO CENTRAL (estrategia_core) — a
+    # mesma lógica que o radar ao vivo usa. Aqui só aplicamos P&L (taxa +
+    # slippage de saída) e marcamos a equity candle a candle.
+    sinais_compra, sinais_venda = calcular_sinais(m_rapida, m_lenta, m_filtro, fechamento)
+    eventos, _ = simular_posicao(abertura, minima, atr, sinais_compra, sinais_venda, multi_atr, slippage)
 
     capital = CAPITAL_INICIAL
     posicionado = False
     quantidade_ativo = 0.0
-    stop_loss_price = 0.0
     num_trades = 0
     equity_curve = np.empty(n)
     equity_curve[0] = capital
 
+    ev_idx = 0
+    n_ev = len(eventos)
     for i in range(1, n):
-        if not posicionado and sinais_compra[i - 1]:
-            preco_bruto = abertura[i]
-            if preco_bruto > 0:
-                preco_compra = preco_bruto * (1 + slippage)
-                quantidade_ativo = (capital / preco_compra) * (1 - taxa)
+        if ev_idx < n_ev and eventos[ev_idx][1] == i:
+            tipo, _idx, preco_ev, _stop = eventos[ev_idx]
+            if tipo == "entrada":
+                # preco_ev = abertura[i] * (1 + slippage) (definido no core)
+                quantidade_ativo = (capital / preco_ev) * (1 - taxa)
                 posicionado = True
-                stop_loss_price = preco_compra - (atr[i - 1] * multi_atr)
-        elif posicionado:
-            if minima[i] < stop_loss_price or sinais_venda[i - 1]:
-                preco_bruto_saida = (
-                    min(stop_loss_price, abertura[i])
-                    if minima[i] < stop_loss_price
-                    else abertura[i]
-                )
-                preco_saida = preco_bruto_saida * (1 - slippage)
+            else:  # saida
+                preco_saida = preco_ev * (1 - slippage)
                 capital = (quantidade_ativo * preco_saida) * (1 - taxa)
                 posicionado = False
                 num_trades += 1
+            ev_idx += 1
         equity_curve[i] = capital if not posicionado else (quantidade_ativo * fechamento[i])
 
     capital_final = equity_curve[-1]

@@ -37,23 +37,23 @@ import streamlit as st
 from config_v4 import (
     CANDLES_POR_DIA,
     CAPITAL_INICIAL,
-    ATIVOS_LIQUIDOS,
     ATIVOS_PORTFOLIO_V4,
+    RECEITA_ROBUSTA,
+    grupo_ouro,
     carregar_dados,
     separar_periodos,
     classificar_liquidez,
 )
 from otimizador_v4 import executar_backtest_v4
+from estrategia_core import estado_posicao_atual
 
 st.set_page_config(page_title="Estratégia V4 - Radar & Portfólio", layout="wide", page_icon="📡")
 alt.data_transformers.disable_max_rows()  # séries de anos em 4h passam do limite padrão (5000 linhas)
 
-RESUMO_CSV = "otimizador_v4_RESUMO_ATIVOS.csv"
-PESOS_CSV = "portfolio_v4_pesos.csv"
-PORTFOLIO_DEV_CSV = "portfolio_v4_resultado.csv"
-PORTFOLIO_HOLDOUT_CSV = "holdout_v4_portfolio_resultado.csv"
-HOLDOUT_POR_ATIVO_CSV = "holdout_v4_resultado.csv"
-DSR_ALERTA_LIMITE = 5.0  # % — abaixo disso, aviso de "histórico curto"
+RESUMO_CSV = "otimizador_v4_RESUMO_ATIVOS.csv"  # manifesto: lista de ativos, interval, grupo, DSR
+DSR_ALERTA_LIMITE = 5.0  # % — abaixo disso, aviso de "sem significância estatística"
+# (os antigos CSVs de portfólio/pesos não são mais lidos: tudo é calculado ao
+#  vivo pela receita robusta em computar_portfolio_robusto)
 
 COR_ALTA = "#22c55e"
 COR_BAIXA = "#ef4444"
@@ -63,21 +63,8 @@ COR_MENOS_LIQUIDO = "#a855f7"
 COR_ESTRATEGIA = "#34d399"
 COR_BUYHOLD = "#fbbf24"
 
-# ----------------------------------------------------------------------------
-# RECEITA "OURO ROBUSTA" por grupo (derivada em estrategia_ouro_v5.py +
-# analise_padroes_profunda.py: moda do corte de 5% por Score_Robustez, no DEV).
-# NÃO é a que a otimização usa por ativo — é uma receita ÚNICA por grupo, pra
-# comparar lado a lado com o otimizado. Ver RELATORIO_ESTRATEGIA_OURO.md.
-#   veterana = ativos líquidos/antigos (ATIVOS_LIQUIDOS); nova = o resto.
-# ----------------------------------------------------------------------------
-RECEITA_ROBUSTA = {
-    "veterana": dict(media_rapida=5, media_lenta=100, media_filtro=50, atr_periodo=7, atr_multiplicador=6.0),
-    "nova": dict(media_rapida=12, media_lenta=30, media_filtro=100, atr_periodo=20, atr_multiplicador=5.0),
-}
-
-
-def grupo_ouro(ativo: str) -> str:
-    return "veterana" if ativo in ATIVOS_LIQUIDOS else "nova"
+# RECEITA_ROBUSTA e grupo_ouro agora vivem no config_v4 (fonte única da verdade,
+# importados acima) — antes estavam duplicados aqui.
 
 # ----------------------------------------------------------------------------
 # CSS - tema escuro tipo dashboard (o base=dark já vem de .streamlit/config.toml)
@@ -175,56 +162,14 @@ def carregar_csv(caminho):
 # cruzamento que mudou o estado — usada só pra ordenar/exibir os cards).
 # ----------------------------------------------------------------------------
 def estado_atual_posicao(df_fast: dict, params: dict) -> dict:
-    m_rapida = df_fast[f"ma_{params['media_rapida']}"]
-    m_lenta = df_fast[f"ma_{params['media_lenta']}"]
-    m_filtro = df_fast[f"ma_f_{params['media_filtro']}"]
-    abertura = df_fast["abertura"]
-    minima = df_fast["minima"]
-    fechamento = df_fast["fechamento"]
-    atr = df_fast[f"atr_{params['atr_periodo']}"]
-    t_abert = df_fast["t_abert"]
-    multi_atr = params["atr_multiplicador"]
-    n = len(fechamento)
-
-    vazio = {"posicionado": False, "preco_entrada": None, "stop_atual": None, "preco_atual": None, "preco_sinal": None, "data_mudanca": None}
-    if n < 5:
-        return vazio
-
-    sinais_compra = np.zeros(n, dtype=bool)
-    sinais_compra[1:] = (
-        (m_rapida[1:] > m_lenta[1:])
-        & (m_rapida[:-1] <= m_lenta[:-1])
-        & (fechamento[1:] > m_filtro[1:])
-    )
-    sinais_venda = np.zeros(n, dtype=bool)
-    sinais_venda[1:] = (m_rapida[1:] < m_lenta[1:]) & (m_rapida[:-1] >= m_lenta[:-1])
-
-    posicionado = False
-    preco_entrada = 0.0
-    stop_loss_price = 0.0
-    data_mudanca = None
-    preco_mudanca = None
-    for i in range(1, n):
-        if not posicionado and sinais_compra[i - 1]:
-            preco_entrada = abertura[i]
-            posicionado = True
-            stop_loss_price = preco_entrada - (atr[i - 1] * multi_atr)
-            data_mudanca = t_abert[i]
-            preco_mudanca = abertura[i]
-        elif posicionado:
-            if minima[i] < stop_loss_price or sinais_venda[i - 1]:
-                posicionado = False
-                data_mudanca = t_abert[i]
-                preco_mudanca = abertura[i]
-
-    return {
-        "posicionado": posicionado,
-        "preco_entrada": preco_entrada if posicionado else None,
-        "stop_atual": stop_loss_price if posicionado else None,
-        "preco_atual": float(fechamento[-1]),
-        "preco_sinal": float(preco_mudanca) if preco_mudanca is not None else None,
-        "data_mudanca": pd.Timestamp(data_mudanca) if data_mudanca is not None else None,
-    }
+    """Wrapper fino sobre estrategia_core.estado_posicao_atual — a MESMA lógica
+    de entrada/saída/stop que o backtest (executar_backtest_v4) usa, agora numa
+    fonte única. O radar não pode mais divergir do que a estratégia testou.
+    Só embrulha data_mudanca em pd.Timestamp para o resto do app formatar."""
+    d = estado_posicao_atual(df_fast, params, slippage=0.0)
+    if d["data_mudanca"] is not None:
+        d["data_mudanca"] = pd.Timestamp(d["data_mudanca"])
+    return d
 
 
 def montar_df_fast(df: pd.DataFrame, params: dict) -> dict:

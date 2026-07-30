@@ -138,6 +138,25 @@ def classificar_liquidez(symbol: str) -> dict:
 
 
 # ----------------------------------------------------------------------------
+# RECEITA OURO ROBUSTA (fonte única da verdade) — a receita ÚNICA POR GRUPO que
+# a produção (app_v4) usa nos sinais, gráficos e portfólio. Derivada em
+# estrategia_ouro_v5.py + analise_padroes_profunda.py (moda do corte de 5% por
+# Score_Robustez, no período de desenvolvimento). NÃO são os parâmetros
+# otimizados por ativo (que se mostraram overfitting). Ver RELATORIO_ESTRATEGIA_OURO.md.
+#   veterana = ativos líquidos/antigos (ATIVOS_LIQUIDOS); nova = o resto.
+# ----------------------------------------------------------------------------
+RECEITA_ROBUSTA = {
+    "veterana": dict(media_rapida=5, media_lenta=100, media_filtro=50, atr_periodo=7, atr_multiplicador=6.0),
+    "nova": dict(media_rapida=12, media_lenta=30, media_filtro=100, atr_periodo=20, atr_multiplicador=5.0),
+}
+
+
+def grupo_ouro(symbol: str) -> str:
+    """Grupo da receita ouro robusta: 'veterana' (líquidas/antigas) ou 'nova'."""
+    return "veterana" if symbol in ATIVOS_LIQUIDOS else "nova"
+
+
+# ----------------------------------------------------------------------------
 # DADOS
 # ----------------------------------------------------------------------------
 def carregar_dados(symbol: str, interval_str: str) -> pd.DataFrame:

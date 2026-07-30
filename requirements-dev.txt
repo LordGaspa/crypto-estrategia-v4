@@ -1,0 +1,4 @@
+# Dependências só de desenvolvimento/testes (não precisam ir pro deploy do app).
+# Instalar: .venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+# Rodar testes: .venv\Scripts\python.exe -m pytest tests/ -q
+pytest==9.1.1
