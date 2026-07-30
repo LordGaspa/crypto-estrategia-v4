@@ -100,6 +100,96 @@ def simular_posicao(abertura, minima, atr, sinais_compra, sinais_venda, multi_at
     return eventos, estado_final
 
 
+def simular_posicao_trailing(
+    abertura, minima, maxima, atr,
+    sinais_compra, sinais_venda,
+    multi_atr,
+    ativacao_x=1.5,
+    mult_trailing=3.0,
+    usar_saida_cruzamento=False,
+    slippage=0.0,
+):
+    """Como simular_posicao, mas com stop TRAILING após lucro atingir ativacao_x
+    × risco_inicial.
+
+    Regras:
+      - Entrada: igual ao simular_posicao (abertura[i] × (1+slippage), stop fixo
+        = entrada − atr[i-1] × multi_atr).
+      - Stop fixo fica ativo até o lucro flutuante atingir ativacao_x × risco_inicial.
+      - Quando ativa o trailing, o stop passa a ser:
+            max(stop_atual, maxima_desde_entrada − atr_entrada × mult_trailing)
+        O stop NUNCA desce. O ATR usado no trailing é o ATR NO MOMENTO DA ENTRADA
+        (constante para aquela posição), evitando que uma queda brusca no ATR
+        mantenha o stop muito próximo.
+      - Saída por cruzamento contrário (sinais_venda): só acontece se
+        usar_saida_cruzamento=True. Se False, a posição só fecha por stop.
+        (Padrão False porque o trailing stop já é a saída principal — manter o
+        cruzamento poderia fechar cedo numa correção parcial dentro de uma alta
+        maior, que é justamente o que queremos capturar.)
+
+    Retorna os mesmos tipos que simular_posicao: (eventos, estado_final)."""
+    abertura = np.asarray(abertura)
+    minima   = np.asarray(minima)
+    maxima   = np.asarray(maxima)
+    atr      = np.asarray(atr)
+    n = len(abertura)
+
+    eventos = []
+    posicionado    = False
+    stop           = 0.0
+    entrada_idx    = None
+    entrada_preco  = None
+    atr_entrada    = 0.0
+    risco_inicial  = 0.0
+    max_preco      = 0.0
+    trailing_ativo = False
+
+    for i in range(1, n):
+        if not posicionado and sinais_compra[i - 1] and abertura[i] > 0:
+            entrada_preco  = abertura[i] * (1 + slippage)
+            atr_entrada    = float(atr[i - 1]) if np.isfinite(atr[i - 1]) else 0.0
+            stop           = entrada_preco - atr_entrada * multi_atr
+            risco_inicial  = entrada_preco - stop
+            max_preco      = entrada_preco
+            trailing_ativo = False
+            entrada_idx    = i
+            posicionado    = True
+            eventos.append(("entrada", i, entrada_preco, stop))
+        elif posicionado:
+            if maxima[i] > max_preco:
+                max_preco = maxima[i]
+
+            # Ativa trailing quando lucro flutuante >= ativacao_x * risco_inicial
+            if not trailing_ativo and risco_inicial > 0:
+                lucro_float = max_preco - entrada_preco
+                if lucro_float >= ativacao_x * risco_inicial:
+                    trailing_ativo = True
+
+            # Atualiza stop (só sobe)
+            if trailing_ativo and atr_entrada > 0:
+                stop_trail = max_preco - atr_entrada * mult_trailing
+                if stop_trail > stop:
+                    stop = stop_trail
+
+            # Verifica saida
+            furou_stop   = minima[i] < stop
+            cruzou_venda = usar_saida_cruzamento and sinais_venda[i - 1]
+            if furou_stop or cruzou_venda:
+                preco_bruto = min(stop, abertura[i]) if furou_stop else abertura[i]
+                eventos.append(("saida", i, preco_bruto, stop))
+                posicionado    = False
+                trailing_ativo = False
+
+    estado_final = {
+        "posicionado":   posicionado,
+        "stop":          stop if posicionado else None,
+        "trailing_ativo": trailing_ativo if posicionado else False,
+        "entrada_idx":   entrada_idx if posicionado else None,
+        "entrada_preco": entrada_preco if posicionado else None,
+    }
+    return eventos, estado_final
+
+
 def estado_posicao_atual(df_fast, params, slippage=0.0):
     """Estado da posição no ÚLTIMO candle, para o radar ao vivo. Usa exatamente
     a mesma lógica (`calcular_sinais` + `simular_posicao`) que o backtest, então

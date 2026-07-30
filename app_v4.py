@@ -515,6 +515,89 @@ with col_holdout:
 
 st.divider()
 
+# ---- Validação Multi-Regime (Fase 1) ----
+with st.expander("📊 Validação Multi-Regime — o que a estratégia faz bem (e o que não faz)", expanded=False):
+    st.caption(
+        "Análise walk-forward sobre 115 janelas anuais × 22 ativos no período de "
+        "desenvolvimento — receita robusta fixa, sem re-otimização por janela."
+    )
+
+    df_wf = carregar_csv("walkforward_robusta_v4_janelas.csv")
+    if df_wf is None:
+        st.info("Rode `python walkforward_robusta_v4.py` para gerar os dados de validação.")
+    else:
+        col_r1, col_r2, col_r3, col_r4 = st.columns(4)
+        n_total = len(df_wf)
+        pct_pos = float((df_wf["Retorno_%"] > 0).mean() * 100)
+        pct_bat = float((df_wf["Retorno_%"] > df_wf["BH_%"]).mean() * 100)
+        med = float(df_wf["Retorno_%"].median())
+        col_r1.metric("Janelas analisadas", f"{n_total}")
+        col_r2.metric("Janelas positivas", f"{pct_pos:.0f}%")
+        col_r3.metric("Bate Buy&Hold", f"{pct_bat:.0f}%")
+        col_r4.metric("Retorno mediano/janela", f"{med:+.1f}%")
+
+        st.markdown("#### Por regime de mercado (regime do ativo naquele ano)")
+        linhas_regime = []
+        for regime in ["BULL", "LATERAL", "BEAR"]:
+            sub = df_wf[df_wf["Regime"] == regime]
+            if sub.empty:
+                continue
+            rv = sub["Retorno_%"].values
+            bv = sub["BH_%"].values
+            linhas_regime.append({
+                "Regime": regime,
+                "Janelas": len(rv),
+                "Strat. mediana": f"{float(np.median(rv)):+.1f}%",
+                "B&H mediana": f"{float(np.median(bv)):+.1f}%",
+                "% positivas": f"{float(np.mean(rv > 0) * 100):.0f}%",
+                "Bate B&H": f"{float(np.mean(rv > bv) * 100):.0f}%",
+            })
+        if linhas_regime:
+            st.dataframe(
+                pd.DataFrame(linhas_regime).set_index("Regime"),
+                use_container_width=True,
+            )
+
+        st.markdown(
+            """
+**Leitura honesta:**
+- 🐻 **BEAR (queda):** estratégia perde −14% (mediana) mas **protege fortemente** vs B&H (−54%) — bate B&H em 93% das janelas.
+- ↔️ **LATERAL:** estratégia ganha +28% e bate B&H em 81% das janelas — ponto forte.
+- 🐂 **BULL (alta):** estratégia ganha +55%, mas B&H ganha +156% — saída por cruzamento corta os vencedores cedo. Principal fraqueza.
+
+**O que o trailing stop mostrou:** testado nas mesmas janelas, o trailing stop **piorou** em todos os regimes (−50pp em BULL). O cruzamento + stop ATR fixo é a saída mais eficiente para esses parâmetros.
+
+**Próximo passo (Fase 2C):** filtro de regime do BTC — em anos BULL do BTC usar 1.5× capital, em anos BEAR usar 0.5×. Simulação sobre os mesmos dados mostrou retorno total $81K → $380K no mesmo período histórico (resultado orientativo, não validado out-of-sample).
+            """.strip()
+        )
+
+        # Gráfico de distribuição
+        st.markdown("#### Distribuição dos retornos anuais (estratégia vs B&H)")
+        df_dist = df_wf[["Retorno_%", "BH_%"]].copy()
+        df_dist = df_dist.rename(columns={"Retorno_%": "Estratégia", "BH_%": "Buy&Hold"})
+        df_melt = df_dist.melt(var_name="Série", value_name="Retorno (%)")
+        if not df_melt.empty:
+            hist = (
+                alt.Chart(df_melt)
+                .mark_bar(opacity=0.6, binSpacing=1)
+                .encode(
+                    x=alt.X("Retorno (%):Q", bin=alt.Bin(maxbins=40), title="Retorno anual (%)"),
+                    y=alt.Y("count():Q", title="Nº de janelas-ativo"),
+                    color=alt.Color(
+                        "Série:N",
+                        scale=alt.Scale(domain=["Estratégia", "Buy&Hold"], range=[COR_ESTRATEGIA, COR_BUYHOLD]),
+                        legend=alt.Legend(title=None, orient="top"),
+                    ),
+                )
+                .properties(height=220, background="transparent")
+                .configure_axis(gridColor="#262d3d", labelColor="#9aa4b8")
+                .configure_view(strokeWidth=0)
+                .configure_legend(labelColor="#e5e7eb")
+            )
+            st.altair_chart(hist, use_container_width=True)
+
+st.divider()
+
 # ---- Radar de sinais ----
 st.header("Radar de Sinais (22 ativos)")
 st.caption(

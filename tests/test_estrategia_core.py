@@ -14,7 +14,7 @@ Cobrem:
 import numpy as np
 import pandas as pd
 
-from estrategia_core import calcular_sinais, simular_posicao, estado_posicao_atual
+from estrategia_core import calcular_sinais, simular_posicao, estado_posicao_atual, simular_posicao_trailing
 from otimizador_v4 import executar_backtest_v4
 
 
@@ -40,6 +40,7 @@ def build_synthetic(n=1200, seed=42):
 
 def montar(df, p):
     d = {"abertura": df["abertura"].values, "minima": df["minima"].values,
+         "maxima": df["maxima"].values,
          "fechamento": df["fechamento"].values, "t_abert": df["t_abert"].values}
     d[f"ma_{p['media_rapida']}"] = df["fechamento"].rolling(p["media_rapida"]).mean().values
     d[f"ma_{p['media_lenta']}"] = df["fechamento"].rolling(p["media_lenta"]).mean().values
@@ -161,7 +162,103 @@ def test_golden_master_backtest():
 
 
 # ---------------------------------------------------------------------------
-# 5) concordância: o radar (estado_posicao_atual) tem que concordar com a
+# 6) simular_posicao_trailing: comportamento básico do trailing stop
+# ---------------------------------------------------------------------------
+def test_trailing_nao_ativa_antes_do_limiar():
+    """Enquanto o lucro não atinge ativacao_x × risco, o stop deve ser igual ao
+    stop fixo inicial — o trailing ainda não está ativo."""
+    # Série que sobe devagar (nunca ativa trailing) e depois cai
+    n = 20
+    abertura   = np.ones(n) * 100.0
+    fechamento = np.ones(n) * 100.0
+    maxima     = np.ones(n) * 100.0
+    minima     = np.ones(n) * 100.0
+    atr        = np.ones(n) * 2.0          # ATR = 2 → stop inicial = 100 - 3×2 = 94
+    multi_atr  = 3.0
+    # sinal de compra no candle 1 (índice 0)
+    compra = np.array([True] + [False] * (n - 1))
+    venda  = np.zeros(n, dtype=bool)
+
+    eventos, estado = simular_posicao_trailing(
+        abertura, minima, maxima, atr, compra, venda, multi_atr,
+        ativacao_x=2.0, mult_trailing=2.0,
+    )
+    # Deve ter entrado
+    assert len(eventos) >= 1 and eventos[0][0] == "entrada"
+    # Trailing NÃO ativou: lucro máximo = 0 < ativacao_x × risco
+    assert not estado["trailing_ativo"]
+
+
+def test_trailing_ativa_e_stop_sobe():
+    """Após o lucro atingir ativacao_x × risco, o stop trailing deve ser maior
+    que o stop fixo inicial."""
+    n = 30
+    atr_val    = 5.0
+    multi_atr  = 2.0
+    entrada    = 100.0
+    stop_ini   = entrada - atr_val * multi_atr   # 90
+    risco_ini  = entrada - stop_ini              # 10
+    ativacao_x = 1.0                            # ativa com 1× risco = 10 pontos de lucro
+    mult_trail = 1.5
+
+    # Sobe de 100 para 115 (acima de ativacao), depois vai para 111
+    preco = np.array(
+        [100.0, 100.0, 102.0, 105.0, 110.0, 115.0, 115.0, 115.0, 111.0, 111.0]
+        + [111.0] * (n - 10)
+    )
+    abertura   = preco.copy()
+    maxima     = preco.copy()
+    minima     = preco.copy()
+    atr        = np.full(n, atr_val)
+    compra     = np.array([True] + [False] * (n - 1))
+    venda      = np.zeros(n, dtype=bool)
+
+    eventos, estado = simular_posicao_trailing(
+        abertura, minima, maxima, atr, compra, venda, multi_atr,
+        ativacao_x=ativacao_x, mult_trailing=mult_trail,
+    )
+    # Deve ter entrado
+    assert eventos[0][0] == "entrada"
+    # Ainda posicionado (preço não caiu o suficiente para bater o trailing)
+    # Stop trailing = max_preco - atr_entrada * mult_trail = 115 - 5*1.5 = 107.5 > stop_ini=90
+    # O preço em 111 > 107.5, logo ainda não saiu
+    assert estado["posicionado"]
+    assert estado["trailing_ativo"]
+    # Stop atual deve ser >= stop_ini (o trailing só sobe)
+    assert estado["stop"] >= stop_ini
+
+
+def test_trailing_stop_sai_quando_cai_alem_do_trail():
+    """A posição deve fechar quando a mínima do candle fica abaixo do stop trailing."""
+    n = 20
+    atr_val    = 5.0
+    multi_atr  = 2.0
+    mult_trail = 1.0   # trail muito próximo: stop = max - 1×ATR
+    ativacao_x = 0.5   # ativa rápido
+
+    # Sobe até 115, então despenca para 108 (< 115 - 5 = 110) → saída
+    preco = np.array([100.0, 102.0, 107.0, 115.0, 108.0] + [108.0] * (n - 5))
+    abertura  = preco.copy()
+    maxima    = preco.copy()
+    minima    = preco.copy()
+    # Mínima do candle 4 (despenca) deve ser < stop_trail = 115 - 5 = 110
+    minima[4] = 106.0
+    atr       = np.full(n, atr_val)
+    compra    = np.array([True] + [False] * (n - 1))
+    venda     = np.zeros(n, dtype=bool)
+
+    eventos, estado = simular_posicao_trailing(
+        abertura, minima, maxima, atr, compra, venda, multi_atr,
+        ativacao_x=ativacao_x, mult_trailing=mult_trail,
+    )
+    tipos = [e[0] for e in eventos]
+    assert "entrada" in tipos
+    assert "saida" in tipos
+    assert not estado["posicionado"]
+
+
+# ---------------------------------------------------------------------------
+# 7 (antiga 5)) concordância: o radar (estado_posicao_atual) tem que concordar com a
 #    posição implícita do backtest no último candle — senão o radar mente.
 # ---------------------------------------------------------------------------
 def test_concordancia_radar_vs_backtest():
