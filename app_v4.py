@@ -515,6 +515,114 @@ with col_holdout:
 
 st.divider()
 
+# ---- Modo de Alocação (Regime BTC ao vivo) ----
+@st.cache_data(ttl=3600)
+def regime_btc_atual():
+    """Retorna o regime BTC atual (BULL/LATERAL/BEAR) baseado no retorno dos
+    últimos 365 dias (mesma classificação usada na Fase 1 walk-forward)."""
+    df_btc = carregar_dados("BTCUSDT", "6h")
+    if df_btc is None or df_btc.empty or len(df_btc) < 2:
+        return None, None, None
+    preco_atual = float(df_btc["fechamento"].iloc[-1])
+    data_atual  = pd.to_datetime(df_btc["t_abert"].iloc[-1])
+    data_12m    = data_atual - pd.Timedelta(days=365)
+    df_12m = df_btc[pd.to_datetime(df_btc["t_abert"]) >= data_12m]
+    if df_12m.empty:
+        return None, None, None
+    preco_12m_atras = float(df_12m["fechamento"].iloc[0])
+    ret_12m = (preco_atual / preco_12m_atras - 1) * 100
+    if ret_12m > 25:
+        regime = "BULL"
+    elif ret_12m < -25:
+        regime = "BEAR"
+    else:
+        regime = "LATERAL"
+    return regime, ret_12m, preco_atual
+
+
+regime_btc, ret_btc_12m, preco_btc = regime_btc_atual()
+
+st.subheader("🧭 Modo de Alocação — Filtro de Regime BTC")
+st.caption(
+    "Com base no retorno do BTC nos últimos 12 meses, ajuste o tamanho das suas posições. "
+    "Simulação histórica: Defensivo $81K → Agressivo $380K (mesmo período de dev, 8 anos)."
+)
+
+if regime_btc is not None:
+    COR_BULL    = "#22c55e"
+    COR_BEAR    = "#ef4444"
+    COR_LATERAL = "#f59e0b"
+    cor_regime  = COR_BULL if regime_btc == "BULL" else (COR_BEAR if regime_btc == "BEAR" else COR_LATERAL)
+    emoji_regime= "🐂" if regime_btc == "BULL" else ("🐻" if regime_btc == "BEAR" else "↔️")
+    btc_txt     = f"BTC/USDT ${preco_btc:,.0f} · retorno 12m: {ret_btc_12m:+.1f}%"
+
+    modos = [
+        {
+            "nome": "🛡️ Defensivo",
+            "multiplicador": "1× (sem mudança)",
+            "descricao": "Sempre usa 100% dos pesos calculados. A receita atual.",
+            "ativo_em": ["BULL", "LATERAL", "BEAR"],
+            "cor": "#64748b",
+            "hist": "Mediana/janela: +15%  ·  Simulação dev: ~$81K",
+        },
+        {
+            "nome": "⚖️ Filtrado",
+            "multiplicador": "1× (BULL/LATERAL) · 0.5× (BEAR BTC)",
+            "descricao": "Em anos BEAR do BTC, metade do capital fica em cash.",
+            "ativo_em": ["BULL", "LATERAL", "BEAR"],
+            "cor": "#3b82f6",
+            "hist": "Mediana/janela: +15%  ·  Simulação dev: ~$109K  (+35%)",
+        },
+        {
+            "nome": "🚀 Agressivo",
+            "multiplicador": "1.5× (BULL BTC) · 1× (LATERAL) · 0.5× (BEAR BTC)",
+            "descricao": "Aumenta exposure em BULL, reduz em BEAR. Mais retorno, mais drawdown.",
+            "ativo_em": ["BULL", "LATERAL", "BEAR"],
+            "cor": "#a855f7",
+            "hist": "Mediana/janela: +22.5%  ·  Simulação dev: ~$380K  (+370%)",
+        },
+    ]
+
+    # Card do regime atual
+    st.markdown(
+        f'<div style="background:{cor_regime}18; border:1px solid {cor_regime}55; border-left:4px solid {cor_regime}; '
+        f'border-radius:10px; padding:10px 16px; margin-bottom:12px;">'
+        f'<span style="font-size:1.05rem; font-weight:700; color:{cor_regime};">{emoji_regime} Regime BTC atual: {regime_btc}</span>'
+        f'<br><span style="font-size:0.85rem; color:#94a3b8;">{btc_txt}</span>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    multi_recomendado = {
+        "BULL":    {"Defensivo": "1×", "Filtrado": "1×", "Agressivo": "<b>1.5×</b> ← agora"},
+        "LATERAL": {"Defensivo": "1×", "Filtrado": "1×", "Agressivo": "1×"},
+        "BEAR":    {"Defensivo": "1×", "Filtrado": "<b>0.5×</b> ← agora", "Agressivo": "<b>0.5×</b> ← agora"},
+    }
+
+    cols_modo = st.columns(3)
+    for col, modo in zip(cols_modo, modos):
+        with col:
+            multi = multi_recomendado[regime_btc][modo["nome"].split()[-1]]
+            st.markdown(
+                f'<div style="background:{modo["cor"]}14; border:1px solid {modo["cor"]}44; '
+                f'border-radius:10px; padding:10px 14px;">'
+                f'<div style="font-weight:700; color:{modo["cor"]}; font-size:0.95rem;">{modo["nome"]}</div>'
+                f'<div style="font-size:0.78rem; color:#cbd5e1; margin-top:4px;">{modo["descricao"]}</div>'
+                f'<div style="font-size:0.78rem; color:#64748b; margin-top:6px; font-style:italic;">{modo["hist"]}</div>'
+                f'<div style="margin-top:8px; font-size:0.85rem; color:#f1f5f9;"><b>Agora ({regime_btc}):</b> {multi}</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+    st.caption(
+        "⚠️ Simulação histórica = retornos da Fase 1 (walk-forward dev) escalados por fator de posição. "
+        "Não é um backtest com sizes dinâmicos reais — é orientativo. Valide antes de aplicar capital real."
+    )
+else:
+    st.info("Não foi possível calcular o regime BTC atual (sem conexão com a API).")
+
+st.divider()
+
 # ---- Validação Multi-Regime (Fase 1) ----
 with st.expander("📊 Validação Multi-Regime — o que a estratégia faz bem (e o que não faz)", expanded=False):
     st.caption(
