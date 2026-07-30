@@ -160,27 +160,41 @@ def grupo_ouro(symbol: str) -> str:
 # DADOS
 # ----------------------------------------------------------------------------
 def carregar_dados(symbol: str, interval_str: str) -> pd.DataFrame:
-    """Baixa (ou lê do cache) OHLC + timestamp pro símbolo/interval dados."""
+    """Baixa (ou lê do cache) OHLC + timestamp pro símbolo/interval dados.
+
+    Alguns provedores de nuvem (ex.: Streamlit Community Cloud, hospedado nos
+    EUA) têm o IP bloqueado pela Binance ("restricted location"). Nesse caso,
+    caímos de volta pro cache local mesmo que esteja velho — é a única fonte
+    de dados disponível ali. Um cache inicial (22 ativos) vai versionado no
+    repo justamente pra isso (ver cache_dados/ no .gitignore)."""
     os.makedirs(CACHE_DIR, exist_ok=True)
     cache_path = os.path.join(CACHE_DIR, f"{symbol}_{interval_str}.parquet")
+
+    def _ler_cache():
+        try:
+            df_cache = pd.read_parquet(cache_path)
+            if "t_abert" in df_cache.columns:
+                return df_cache
+        except Exception:
+            pass
+        return None
+
     if os.path.exists(cache_path):
         idade_horas = (datetime.now().timestamp() - os.path.getmtime(cache_path)) / 3600
         if idade_horas < CACHE_VALIDADE_HORAS:
-            try:
-                df_cache = pd.read_parquet(cache_path)
-                if "t_abert" in df_cache.columns:
-                    return df_cache
-            except Exception:
-                pass
-    client = Client()
-    interval_val = TIMEFRAME_MAP[interval_str]
-    start_date = (
-        datetime.now() - timedelta(days=ANOS_DE_DADOS_BACKTEST * 365)
-    ).strftime("%d %b, %Y")
+            df_cache = _ler_cache()
+            if df_cache is not None:
+                return df_cache
+
     try:
+        client = Client(ping=False)
+        interval_val = TIMEFRAME_MAP[interval_str]
+        start_date = (
+            datetime.now() - timedelta(days=ANOS_DE_DADOS_BACKTEST * 365)
+        ).strftime("%d %b, %Y")
         klines = client.get_historical_klines(symbol, interval_val, start_date)
         if not klines:
-            return pd.DataFrame()
+            raise ValueError("Binance devolveu 0 candles")
         df = pd.DataFrame(
             klines,
             columns=[
@@ -208,7 +222,10 @@ def carregar_dados(symbol: str, interval_str: str) -> pd.DataFrame:
             print(f"[AVISO] cache não salvo: {e}")
         return df
     except Exception as e:
-        print(f"[ERRO] {symbol} {interval_str}: {e}")
+        print(f"[ERRO] {symbol} {interval_str}: {e} — tentando cache (mesmo velho)")
+        df_cache = _ler_cache()
+        if df_cache is not None:
+            return df_cache
         return pd.DataFrame()
 
 

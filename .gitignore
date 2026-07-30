@@ -3,8 +3,36 @@ __pycache__/
 *.pyc
 .claude/
 
-# cache de candles - o app busca direto da Binance quando não existe, não precisa ir pro repo
-cache_dados/
+# cache de candles - normalmente busca direto da Binance, não precisa ir pro repo.
+# EXCEÇÃO: os 22 pares ativo/interval do portfólio (ATIVOS_PORTFOLIO_V4 em config_v4.py)
+# vão versionados como fallback — a Binance bloqueia por geolocalização os IPs do
+# Streamlit Community Cloud (hospedado nos EUA), então sem esse snapshot o app fica
+# sem NENHUM dado no deploy. Ver carregar_dados() em config_v4.py: cai pro cache
+# mesmo velho quando a API falha. Outros pares/intervals (testes de outros scripts,
+# ex. FETUSDT_1d) continuam ignorados.
+cache_dados/*
+!cache_dados/1MBABYDOGEUSDT_4h.parquet
+!cache_dados/API3USDT_12h.parquet
+!cache_dados/BNBUSDT_12h.parquet
+!cache_dados/BONKUSDT_4h.parquet
+!cache_dados/BTCUSDT_6h.parquet
+!cache_dados/DOGEUSDT_8h.parquet
+!cache_dados/ETHUSDT_8h.parquet
+!cache_dados/FETUSDT_4h.parquet
+!cache_dados/FLOKIUSDT_4h.parquet
+!cache_dados/HBARUSDT_8h.parquet
+!cache_dados/IMXUSDT_6h.parquet
+!cache_dados/INJUSDT_12h.parquet
+!cache_dados/LINKUSDT_6h.parquet
+!cache_dados/PENGUUSDT_4h.parquet
+!cache_dados/PEPEUSDT_4h.parquet
+!cache_dados/RENDERUSDT_4h.parquet
+!cache_dados/SOLUSDT_8h.parquet
+!cache_dados/SUIUSDT_6h.parquet
+!cache_dados/TAOUSDT_4h.parquet
+!cache_dados/TRXUSDT_8h.parquet
+!cache_dados/XRPUSDT_8h.parquet
+!cache_dados/ZECUSDT_4h.parquet
 
 # CSVs grandes de otimização (artefatos intermediários, não usados em tempo de execução pelo app_v4.py)
 otimizador_v2_robustez_*.csv
