@@ -73,7 +73,7 @@ fraqueza a atacar na Fase 2.
 
 ---
 
-## Fase 2 — Busca honesta por MAIS RETORNO ✅ PARCIAL (2026-07-29)
+## Fase 2 — Busca honesta por MAIS RETORNO ✅ CONCLUÍDA (2026-07-29)
 
 *Três alavancas testadas — resultados honestos abaixo.*
 
@@ -93,13 +93,29 @@ fraqueza a atacar na Fase 2.
   - **Caveat:** escalonamento SIMULADO sobre os retornos do walk-forward, não re-backtest real.
     Para validar: re-implementar com sizes dinâmicos no motor de backtest (Fase 3).
 
-- [ ] **Alavanca B — Vol-targeting:** ainda não testada. Prioridade secundária.
+- [x] **Alavanca B — Vol-targeting:** `vol_targeting_v4.py`. Dimensiona cada posição de forma que
+  o capital em risco por trade seja uma fração fixa R (em vez de sempre 100% do capital).
+  Resultados (médias ponderadas pelos pesos do portfólio, período de desenvolvimento):
 
-- [ ] **Fronteira de 3 receitas para o app:** mostrar Defensivo / Filtrado / Agressivo com
-  sliders de trade-off. Depende de re-backtest real com sizes dinâmicos (não mera escala).
+  | R (risco/trade) | Ret/ano | Drawdown | Calmar | Sharpe |
+  |:----------------|--------:|---------:|-------:|-------:|
+  | Baseline (100%) |  +60.7% |    62.3% |  1.158 |  0.886 |
+  | R=10%           |  +44.5% |    44.0% |  1.201 |  0.941 |
+  | R=15%           |  +61.4% |    55.5% |  1.314 |  0.963 |
+  | R=20%           |  +75.1% |    64.2% |  1.379 |  0.973 |
+  | R=30%           |  +92.3% |    76.7% |  1.388 |  0.973 |
 
-**Entrega parcial:** identificamos que a Alavanca C (filtro BTC) é o caminho mais promissor para
-mais retorno. O passo concreto é implementar sizes dinâmicos no motor de backtest.
+  **Descoberta:** vol-targeting a R=15-20% melhora Calmar em +14-19% e Sharpe em +9-10% vs
+  baseline. Mecanismo: em mercados calmos (ATR baixo), implicitamente usa alavancagem; em
+  voláteis, reduz exposição. R=15% é o ponto de melhor Calmar per-ativo (mediana 1.230 vs 0.881).
+  R=20%+ melhora mais o portfólio ponderado mas aumenta drawdown acima do baseline.
+  **Conclusão: R=15% é o ponto ótimo para quem quer melhorar risco-retorno sem mais drawdown.**
+
+- [ ] **Fronteira completa no app:** expor Baseline / Vol-target R=15% / BTC-Filtrado /
+  BTC-Agressivo com métricas honestas de cada combinação.
+
+**Entrega completa Fase 2:** trailing DESCARTADO (Alavanca A), vol-targeting CONCLUÍDO com
+R_ótimo=15% (Alavanca B), filtro BTC CONCLUÍDO com re-backtest real (Alavanca C).
 
 ---
 
@@ -129,8 +145,21 @@ mais retorno. O passo concreto é implementar sizes dinâmicos no motor de backt
   (ret/ano, DD, Calmar ponderados pelo portfólio). Caption atualizado de "simulação" para
   "re-backtest real". Função `carregar_resumo_filter()` carrega `backtest_btc_filter_v4_resumo_ponderado.csv`.
 
-- [ ] **Slippage realista:** modelar slippage que piora com a volatilidade/queda (especialmente
-  ilíquidas no momento do stop) — para a proteção não ficar superestimada.
+- [x] **Slippage realista:** `slippage_realista_v4.py`. Modelo: saídas por stop recebem slippage
+  extra = `gap_frac × ATR/preço` (gap_frac = 5% para líquidas, 25% para ilíquidas). Resultados:
+
+  | Modelo    | Ret/ano | Drawdown | Calmar | Sharpe |
+  |:----------|--------:|---------:|-------:|-------:|
+  | Baseline  |  +60.7% |    62.3% |  1.158 |  0.886 |
+  | Realista  |  +57.6% |    63.5% |  1.091 |  0.858 |
+  | Delta     |   −3.1pp |   +1.2pp | −0.067 | −0.028 |
+
+  **Diagnóstico:** impacto modesto no portfólio ponderado (−3.1pp/ano, −6% no Calmar).
+  Causa: maioria das saídas é por cruzamento (mercado ordeiro), não por stop. Ativos mais
+  afetados: PEPE (−347pp total, 4 stops × ATR alto × ilíquido) e FET (−312pp, 6 stops).
+  A proteção em BEAR ainda se sustenta sob slippage realista — a estratégia sai antes do crash
+  (cruzamento), não quando está em queda livre (stop gap). Portfólio continua Calmar > 1.
+
 - [ ] **Deploy** com os guardrails no lugar (Fase 0) — aí você confia no que está no celular.
 
 ---

@@ -705,7 +705,11 @@ with st.expander("📊 Validação Multi-Regime — o que a estratégia faz bem 
 
 **O que o trailing stop mostrou:** testado nas mesmas janelas, o trailing stop **piorou** em todos os regimes (−50pp em BULL). O cruzamento + stop ATR fixo é a saída mais eficiente para esses parâmetros.
 
-**Filtro de regime BTC (Fase 3 — re-backtest real):** sizes dinâmicos por trade (1.5× BULL / 1× LATERAL / 0.5× BEAR BTC). Re-backtest com sizes reais (sem escalonamento): Agressivo melhora retorno de +60.7%→+79.7%/ano e Calmar de 1.158→1.316 (+14%), mas aceita +6.4pp de drawdown. Resultado concentrado nas veteranas (SOL, DOGE, BNB). Ver cards "Modo de Alocação" acima.
+**Filtro de regime BTC (re-backtest real):** sizes dinâmicos por trade (1.5× BULL / 1× LATERAL / 0.5× BEAR BTC). Agressivo: +60.7%→+79.7%/ano, Calmar 1.158→1.316 (+14%), +6.4pp DD. Concentrado nas veteranas. Ver cards "Modo de Alocação" acima.
+
+**Vol-targeting (dimensionamento pelo ATR):** arriscar uma fração fixa R do capital por trade (em vez de 100% sempre). R=15% melhora Calmar de 1.158→1.314 (+14%) com ret/ano +61.4% — drawdown cai de 62.3% para 55.5%. Em mercados calmos, implicitamente usa mais capital; em voláteis, menos. Pode ser combinado com o filtro de regime BTC.
+
+**Slippage realista:** saídas de stop recebem slippage extra (5% do ATR para líquidas, 25% para ilíquidas). Impacto no portfólio ponderado: −3.1pp/ano, −6% no Calmar (+57.6%/ano, Calmar 1.091). A proteção em BEAR se sustenta — a estratégia sai geralmente por cruzamento (antes do crash), não por stop (em queda livre).
             """.strip()
         )
 

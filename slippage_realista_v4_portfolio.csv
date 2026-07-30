@@ -1,0 +1,3 @@
+Modelo,retorno_total_pct,retorno_anual_pct,drawdown_pct,calmar,sharpe,capital_final
+baseline,-1.98,-3.23,18.22,-0.177,0.183,980.18
+realista,-2.38,-3.87,18.41,-0.2104,0.1579,976.16
