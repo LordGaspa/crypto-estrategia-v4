@@ -174,6 +174,21 @@ def carregar_fronteira():
         return None
 
 
+@st.cache_data
+def carregar_modos_margem():
+    """Checagem de margem por modo (riqueza_terminal_v6_exposicao.py): quanto do
+    tempo a exposição agregada do portfólio passa de 100% do capital, e o
+    resultado Spot-compatível (com teto) vs o resultado com margem.
+
+    Existe porque o modo Agressivo (1.5× em BULL) NÃO é executável em Binance
+    Spot puro — ele exige empréstimo em ~28% do tempo, e os números "históricos"
+    dele embutem essa alavancagem. Sem este aviso o app induziria ao erro."""
+    try:
+        return pd.read_csv("modos_margem_v6.csv").set_index("Modo")
+    except FileNotFoundError:
+        return None
+
+
 # ----------------------------------------------------------------------------
 # SINAL ATUAL - mesma lógica de entrada/saída do v4 (cruzamento + filtro +
 # stop ATR fixo OU cruzamento contrário), calculada localmente pra saber se a
@@ -576,6 +591,8 @@ if regime_btc is not None:
     emoji_regime= "🐂" if regime_btc == "BULL" else ("🐻" if regime_btc == "BEAR" else "↔️")
     btc_txt     = f"BTC/USDT ${preco_btc:,.0f} · retorno 12m: {ret_btc_12m:+.1f}%"
 
+    modos_margem = carregar_modos_margem()
+
     def _hist_str(nome_modo):
         """Retorna string de métricas históricas do modo a partir do CSV pré-computado."""
         if resumo_filter is None:
@@ -590,6 +607,33 @@ if regime_btc is not None:
         except KeyError:
             return ""
 
+    def _margem_html(nome_modo):
+        """Aviso de margem + número Spot-compatível. O modo Agressivo exige
+        empréstimo em ~28% do tempo — sem este aviso o card acima (que mostra
+        o retorno COM alavancagem embutida) induziria ao erro."""
+        if modos_margem is None:
+            return ""
+        try:
+            r = modos_margem.loc[nome_modo]
+        except KeyError:
+            return ""
+        if str(r["exige_margem"]).strip().lower() == "sim":
+            return (
+                f'<div style="margin-top:8px; padding:6px 9px; border-radius:7px; '
+                f'background:{COR_DSR_ALERTA}22; color:{COR_DSR_ALERTA}; '
+                f'border:1px solid {COR_DSR_ALERTA}55; font-size:0.76rem; font-weight:600;">'
+                f'⚠️ EXIGE MARGEM em {r["pct_dias_acima_100"]:.0f}% do tempo — não é Spot puro.<br>'
+                f'<span style="font-weight:500;">Limitado a 100% do capital (Spot): '
+                f'{r["cagr_spot_pct"]:.1f}%/ano, não {r["cagr_margem_pct"]:.1f}%.</span></div>'
+            )
+        return (
+            f'<div style="margin-top:8px; padding:6px 9px; border-radius:7px; '
+            f'background:#22c55e18; color:#22c55e; border:1px solid #22c55e44; '
+            f'font-size:0.76rem; font-weight:600;">'
+            f'✅ Cabe em Spot puro (exposição mediana {r["exposicao_mediana"]:.0%}, '
+            f'nunca passa de 100%).</div>'
+        )
+
     modos = [
         {
             "nome": "🛡️ Defensivo",
@@ -598,6 +642,7 @@ if regime_btc is not None:
             "ativo_em": ["BULL", "LATERAL", "BEAR"],
             "cor": "#64748b",
             "hist": _hist_str("DEFENSIVO"),
+            "margem": _margem_html("DEFENSIVO"),
         },
         {
             "nome": "⚖️ Filtrado",
@@ -606,6 +651,7 @@ if regime_btc is not None:
             "ativo_em": ["BULL", "LATERAL", "BEAR"],
             "cor": "#3b82f6",
             "hist": _hist_str("FILTRADO"),
+            "margem": _margem_html("FILTRADO"),
         },
         {
             "nome": "🚀 Agressivo",
@@ -614,6 +660,7 @@ if regime_btc is not None:
             "ativo_em": ["BULL", "LATERAL", "BEAR"],
             "cor": "#a855f7",
             "hist": _hist_str("AGRESSIVO"),
+            "margem": _margem_html("AGRESSIVO"),
         },
     ]
 
@@ -643,10 +690,22 @@ if regime_btc is not None:
                 f'<div style="font-weight:700; color:{modo["cor"]}; font-size:0.95rem;">{modo["nome"]}</div>'
                 f'<div style="font-size:0.78rem; color:#cbd5e1; margin-top:4px;">{modo["descricao"]}</div>'
                 f'<div style="font-size:0.78rem; color:#64748b; margin-top:6px; font-style:italic;">{modo["hist"]}</div>'
+                f'{modo.get("margem", "")}'
                 f'<div style="margin-top:8px; font-size:0.85rem; color:#f1f5f9;"><b>Agora ({regime_btc}):</b> {multi}</div>'
                 f'</div>',
                 unsafe_allow_html=True,
             )
+
+    if modos_margem is not None:
+        st.warning(
+            "**Atenção ao modo Agressivo:** o multiplicador de 1.5× em BULL faz a exposição "
+            "agregada do portfólio passar de 100% do capital em **28% do tempo** — isso exige "
+            "margem (empréstimo), que a conta Spot da Binance não oferece. As métricas históricas "
+            "no card dele embutem essa alavancagem. Respeitando o limite de 100% do capital, o "
+            "Agressivo rende **+89,5%/ano em vez de +128,9%** — praticamente empatado com o "
+            "Defensivo (+87,4%). Custo de juros e risco de liquidação da margem **não estão "
+            "modelados em nenhum número deste app**. Ver `RELATORIO_RIQUEZA_TERMINAL.md`."
+        )
 
     if resumo_filter is not None:
         st.caption(

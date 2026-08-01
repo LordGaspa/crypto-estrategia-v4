@@ -14,7 +14,10 @@ Cobrem:
 import numpy as np
 import pandas as pd
 
-from estrategia_core import calcular_sinais, simular_posicao, estado_posicao_atual, simular_posicao_trailing
+from estrategia_core import (
+    calcular_sinais, simular_posicao, estado_posicao_atual, simular_posicao_trailing,
+    simular_posicao_filtro_adx, simular_posicao_scale_out, simular_posicao_scale_out_trailing,
+)
 from otimizador_v4 import executar_backtest_v4
 
 
@@ -255,6 +258,414 @@ def test_trailing_stop_sai_quando_cai_alem_do_trail():
     assert "entrada" in tipos
     assert "saida" in tipos
     assert not estado["posicionado"]
+
+
+# ---------------------------------------------------------------------------
+# 6b) simular_posicao_filtro_adx (v6b, direcional): cruzamento contrario so
+#     e ignorado se ADX forte E +DI>-DI (tendencia forte de ALTA)
+# ---------------------------------------------------------------------------
+def test_filtro_adx_ignora_cruzamento_com_tendencia_forte_de_alta():
+    """Cruzamento contrario no candle 3, ADX alto E +DI>-DI (tendencia forte
+    de ALTA) -> deve IGNORAR e continuar posicionado."""
+    n = 8
+    abertura = np.full(n, 100.0)
+    minima = np.full(n, 95.0)  # nunca fura o stop
+    atr = np.full(n, 5.0)
+    compra = np.array([True] + [False] * (n - 1))
+    venda = np.array([False, False, False, True, False, False, False, False])
+    adx = np.full(n, 30.0)  # tendencia forte (limiar padrao 20)
+    plus_di = np.full(n, 25.0)
+    minus_di = np.full(n, 10.0)  # +DI > -DI -> tendencia de ALTA
+
+    eventos, estado = simular_posicao_filtro_adx(
+        abertura, minima, atr, adx, plus_di, minus_di, compra, venda, multi_atr=3.0, adx_limiar=20.0
+    )
+    assert len(eventos) == 1 and eventos[0][0] == "entrada"
+    assert estado["posicionado"]  # continua posicionado, cruzamento foi ignorado
+
+
+def test_filtro_adx_honra_cruzamento_com_tendencia_forte_de_baixa():
+    """CASO DO BUG CORRIGIDO (v6b): ADX alto (tendencia forte), mas -DI>+DI
+    (a tendencia forte e de BAIXA, nao de alta) -> NAO deve ignorar, tem que
+    honrar o cruzamento e sair. Era exatamente este caso que a v6 original
+    (so ADX, sem checar direcao) tratava errado, prendendo a posicao numa
+    queda forte."""
+    n = 8
+    abertura = np.full(n, 100.0)
+    minima = np.full(n, 95.0)
+    atr = np.full(n, 5.0)
+    compra = np.array([True] + [False] * (n - 1))
+    venda = np.array([False, False, False, True, False, False, False, False])
+    adx = np.full(n, 30.0)  # tendencia forte
+    plus_di = np.full(n, 10.0)
+    minus_di = np.full(n, 25.0)  # -DI > +DI -> tendencia de BAIXA
+
+    eventos, estado = simular_posicao_filtro_adx(
+        abertura, minima, atr, adx, plus_di, minus_di, compra, venda, multi_atr=3.0, adx_limiar=20.0
+    )
+    tipos = [e[0] for e in eventos]
+    assert tipos == ["entrada", "saida"]
+    assert not estado["posicionado"]
+
+
+def test_filtro_adx_honra_cruzamento_com_tendencia_fraca():
+    """ADX baixo (tendencia fraca), independente da direcao -> deve sair."""
+    n = 8
+    abertura = np.full(n, 100.0)
+    minima = np.full(n, 95.0)
+    atr = np.full(n, 5.0)
+    compra = np.array([True] + [False] * (n - 1))
+    venda = np.array([False, False, False, True, False, False, False, False])
+    adx = np.full(n, 10.0)  # tendencia fraca (< limiar 20)
+    plus_di = np.full(n, 25.0)
+    minus_di = np.full(n, 10.0)  # direcao de alta, mas ADX fraco deve honrar mesmo assim
+
+    eventos, estado = simular_posicao_filtro_adx(
+        abertura, minima, atr, adx, plus_di, minus_di, compra, venda, multi_atr=3.0, adx_limiar=20.0
+    )
+    tipos = [e[0] for e in eventos]
+    assert tipos == ["entrada", "saida"]
+    assert not estado["posicionado"]
+
+
+def test_filtro_adx_stop_sai_independente_do_adx():
+    """Mesmo com ADX altissimo e tendencia de alta, o STOP tem que funcionar
+    -- o filtro so se aplica ao cruzamento, nunca ao stop de risco."""
+    n = 6
+    abertura = np.array([100.0, 100.0, 100.0, 80.0, 80.0, 80.0])
+    minima = np.array([100.0, 100.0, 100.0, 80.0, 80.0, 80.0])  # candle 3 fura o stop
+    atr = np.full(n, 5.0)  # stop = 100 - 3*5 = 85
+    compra = np.array([True] + [False] * (n - 1))
+    venda = np.zeros(n, dtype=bool)  # nenhum cruzamento -- so testa o stop
+    adx = np.full(n, 50.0)  # tendencia extremamente forte
+    plus_di = np.full(n, 40.0)
+    minus_di = np.full(n, 5.0)  # forte tendencia de alta -- ainda assim o stop tem que valer
+
+    eventos, estado = simular_posicao_filtro_adx(
+        abertura, minima, atr, adx, plus_di, minus_di, compra, venda, multi_atr=3.0, adx_limiar=20.0
+    )
+    tipos = [e[0] for e in eventos]
+    assert tipos == ["entrada", "saida"]
+    assert not estado["posicionado"]
+
+
+# ---------------------------------------------------------------------------
+# 6c) sem look-ahead + reimplementacao independente (filtro_adx)
+# ---------------------------------------------------------------------------
+def _referencia_walk_adx(abertura, minima, atr, adx, plus_di, minus_di, compra, venda, multi, adx_limiar, slippage=0.0):
+    n = len(abertura)
+    pos = False
+    stop = 0.0
+    saldo_eventos = []
+    for i in range(1, n):
+        if not pos and compra[i - 1] and abertura[i] > 0:
+            ent = abertura[i] * (1 + slippage)
+            stop = ent - atr[i - 1] * multi
+            pos = True
+            saldo_eventos.append(("entrada", i))
+        elif pos:
+            validos = np.isfinite(adx[i - 1]) and np.isfinite(plus_di[i - 1]) and np.isfinite(minus_di[i - 1])
+            tendencia_forte_alta = validos and adx[i - 1] >= adx_limiar and plus_di[i - 1] > minus_di[i - 1]
+            if minima[i] < stop or (venda[i - 1] and not tendencia_forte_alta):
+                pos = False
+                saldo_eventos.append(("saida", i))
+    return saldo_eventos, pos
+
+
+def _adx_sintetico_com_direcao(n, seed):
+    """Gera adx/plus_di/minus_di sinteticos coerentes (plus_di+minus_di<=100
+    aproximadamente, como um ADX real) pros testes de propriedade."""
+    rng = np.random.default_rng(seed)
+    adx = rng.uniform(5, 45, size=n)
+    plus_di = rng.uniform(5, 40, size=n)
+    minus_di = rng.uniform(5, 40, size=n)
+    return adx, plus_di, minus_di
+
+
+def test_filtro_adx_bate_com_referencia():
+    df = build_synthetic(seed=21)
+    d = montar(df, P)
+    compra, venda = calcular_sinais(d[f"ma_{P['media_rapida']}"], d[f"ma_{P['media_lenta']}"],
+                                    d[f"ma_f_{P['media_filtro']}"], d["fechamento"])
+    adx, plus_di, minus_di = _adx_sintetico_com_direcao(len(df), seed=99)
+
+    eventos, estado = simular_posicao_filtro_adx(
+        d["abertura"], d["minima"], d[f"atr_{P['atr_periodo']}"], adx, plus_di, minus_di,
+        compra, venda, P["atr_multiplicador"], adx_limiar=20.0,
+    )
+    ref_ev, ref_pos = _referencia_walk_adx(
+        d["abertura"], d["minima"], d[f"atr_{P['atr_periodo']}"], adx, plus_di, minus_di,
+        compra, venda, P["atr_multiplicador"], 20.0,
+    )
+    assert [(t, i) for (t, i, _p, _s) in eventos] == ref_ev
+    assert estado["posicionado"] == ref_pos
+
+
+def test_sem_look_ahead_filtro_adx():
+    df = build_synthetic(seed=21)
+    d = montar(df, P)
+    compra, venda = calcular_sinais(d[f"ma_{P['media_rapida']}"], d[f"ma_{P['media_lenta']}"],
+                                    d[f"ma_f_{P['media_filtro']}"], d["fechamento"])
+    adx, plus_di, minus_di = _adx_sintetico_com_direcao(len(df), seed=99)
+
+    eventos_full, _ = simular_posicao_filtro_adx(
+        d["abertura"], d["minima"], d[f"atr_{P['atr_periodo']}"], adx, plus_di, minus_di,
+        compra, venda, P["atr_multiplicador"], adx_limiar=20.0,
+    )
+    corte = 800
+    eventos_parcial, _ = simular_posicao_filtro_adx(
+        d["abertura"][:corte], d["minima"][:corte], d[f"atr_{P['atr_periodo']}"][:corte],
+        adx[:corte], plus_di[:corte], minus_di[:corte],
+        compra[:corte], venda[:corte], P["atr_multiplicador"], adx_limiar=20.0,
+    )
+    eventos_full_ate_corte = [e for e in eventos_full if e[1] < corte]
+    assert [(t, i) for (t, i, _p, _s) in eventos_full_ate_corte] == \
+           [(t, i) for (t, i, _p, _s) in eventos_parcial]
+
+
+# ---------------------------------------------------------------------------
+# 6d) golden-master: filtro ADX direcional produz numero de trades <= sem
+#     filtro (ele so pode IGNORAR cruzamentos, nunca criar saidas novas)
+# ---------------------------------------------------------------------------
+def test_golden_master_filtro_adx_reduz_ou_iguala_trades():
+    df = build_synthetic()
+    d = montar(df, P)
+    compra, venda = calcular_sinais(d[f"ma_{P['media_rapida']}"], d[f"ma_{P['media_lenta']}"],
+                                    d[f"ma_f_{P['media_filtro']}"], d["fechamento"])
+    eventos_base, _ = simular_posicao(d["abertura"], d["minima"], d[f"atr_{P['atr_periodo']}"],
+                                      compra, venda, P["atr_multiplicador"], 0.0)
+
+    adx, plus_di, minus_di = _adx_sintetico_com_direcao(len(df), seed=7)
+    eventos_adx, _ = simular_posicao_filtro_adx(
+        d["abertura"], d["minima"], d[f"atr_{P['atr_periodo']}"], adx, plus_di, minus_di,
+        compra, venda, P["atr_multiplicador"], adx_limiar=20.0,
+    )
+    n_saidas_base = sum(1 for e in eventos_base if e[0] == "saida")
+    n_saidas_adx = sum(1 for e in eventos_adx if e[0] == "saida")
+    assert n_saidas_adx <= n_saidas_base
+    # com este seed e limiar, o filtro de fato ignora pelo menos 1 cruzamento
+    assert n_saidas_adx < n_saidas_base
+
+
+# ---------------------------------------------------------------------------
+# 6e) simular_posicao_scale_out (candidata B do v6): 1o cruzamento fecha so
+#     uma fracao, 2o cruzamento fecha o resto
+# ---------------------------------------------------------------------------
+def test_scale_out_primeiro_cruzamento_fecha_so_fracao():
+    n = 8
+    abertura = np.full(n, 100.0)
+    minima = np.full(n, 95.0)  # nunca fura o stop
+    atr = np.full(n, 5.0)
+    compra = np.array([True] + [False] * (n - 1))
+    venda = np.array([False, False, False, True, False, False, False, False])
+
+    eventos, estado = simular_posicao_scale_out(
+        abertura, minima, atr, compra, venda, multi_atr=3.0, fracao_saida_parcial=0.5
+    )
+    tipos = [e[0] for e in eventos]
+    assert tipos == ["entrada", "saida_parcial"]
+    assert eventos[1][4] == 0.5  # fracao fechada
+    assert estado["posicionado"]  # ainda tem metade aberta
+    assert estado["fracao_aberta"] == 0.5
+
+
+def test_scale_out_segundo_cruzamento_fecha_o_resto():
+    n = 12
+    abertura = np.full(n, 100.0)
+    minima = np.full(n, 95.0)
+    atr = np.full(n, 5.0)
+    compra = np.array([True] + [False] * (n - 1))
+    venda = np.array([False, False, False, True, False, False, False, True, False, False, False, False])
+
+    eventos, estado = simular_posicao_scale_out(
+        abertura, minima, atr, compra, venda, multi_atr=3.0, fracao_saida_parcial=0.5
+    )
+    tipos = [e[0] for e in eventos]
+    assert tipos == ["entrada", "saida_parcial", "saida"]
+    assert not estado["posicionado"]
+    assert estado["fracao_aberta"] is None
+
+
+def test_scale_out_stop_fecha_tudo_de_uma_vez_sem_parcial_previa():
+    n = 6
+    abertura = np.array([100.0, 100.0, 100.0, 80.0, 80.0, 80.0])
+    minima = np.array([100.0, 100.0, 100.0, 80.0, 80.0, 80.0])  # candle 3 fura o stop
+    atr = np.full(n, 5.0)  # stop = 100 - 3*5 = 85
+    compra = np.array([True] + [False] * (n - 1))
+    venda = np.zeros(n, dtype=bool)  # sem cruzamento -- so testa o stop puro
+
+    eventos, estado = simular_posicao_scale_out(
+        abertura, minima, atr, compra, venda, multi_atr=3.0, fracao_saida_parcial=0.5
+    )
+    tipos = [e[0] for e in eventos]
+    assert tipos == ["entrada", "saida"]  # sem saida_parcial -- stop fecha tudo direto
+    assert not estado["posicionado"]
+
+
+def test_scale_out_stop_fecha_resto_apos_parcial():
+    n = 10
+    abertura = np.array([100.0, 100.0, 100.0, 100.0, 90.0, 80.0, 80.0, 80.0, 80.0, 80.0])
+    minima = np.array([100.0, 100.0, 100.0, 100.0, 90.0, 80.0, 80.0, 80.0, 80.0, 80.0])
+    atr = np.full(n, 5.0)  # stop = 100 - 3*5 = 85 -- candle 5 (idx 5, minima=80) fura
+    compra = np.array([True] + [False] * (n - 1))
+    venda = np.array([False, False, False, True] + [False] * (n - 4))  # parcial no candle 4
+
+    eventos, estado = simular_posicao_scale_out(
+        abertura, minima, atr, compra, venda, multi_atr=3.0, fracao_saida_parcial=0.5
+    )
+    tipos = [e[0] for e in eventos]
+    assert tipos == ["entrada", "saida_parcial", "saida"]  # stop fecha o restante
+    assert not estado["posicionado"]
+
+
+# ---------------------------------------------------------------------------
+# 6f) sem look-ahead + reimplementacao independente (scale_out)
+# ---------------------------------------------------------------------------
+def _referencia_walk_scale_out(abertura, minima, atr, compra, venda, multi, fracao, slippage=0.0):
+    n = len(abertura)
+    pos = False
+    stop = 0.0
+    ja_parcial = False
+    saldo_eventos = []
+    for i in range(1, n):
+        if not pos and compra[i - 1] and abertura[i] > 0:
+            ent = abertura[i] * (1 + slippage)
+            stop = ent - atr[i - 1] * multi
+            pos = True
+            ja_parcial = False
+            saldo_eventos.append(("entrada", i))
+        elif pos:
+            if minima[i] < stop:
+                pos = False
+                saldo_eventos.append(("saida", i))
+            elif venda[i - 1]:
+                if not ja_parcial:
+                    ja_parcial = True
+                    saldo_eventos.append(("saida_parcial", i))
+                else:
+                    pos = False
+                    saldo_eventos.append(("saida", i))
+    return saldo_eventos, pos
+
+
+def test_scale_out_bate_com_referencia():
+    df = build_synthetic(seed=33)
+    d = montar(df, P)
+    compra, venda = calcular_sinais(d[f"ma_{P['media_rapida']}"], d[f"ma_{P['media_lenta']}"],
+                                    d[f"ma_f_{P['media_filtro']}"], d["fechamento"])
+    eventos, estado = simular_posicao_scale_out(
+        d["abertura"], d["minima"], d[f"atr_{P['atr_periodo']}"], compra, venda,
+        P["atr_multiplicador"], fracao_saida_parcial=0.5,
+    )
+    ref_ev, ref_pos = _referencia_walk_scale_out(
+        d["abertura"], d["minima"], d[f"atr_{P['atr_periodo']}"], compra, venda,
+        P["atr_multiplicador"], 0.5,
+    )
+    eventos_norm = [(e[0], e[1]) for e in eventos]
+    assert eventos_norm == ref_ev
+    assert estado["posicionado"] == ref_pos
+
+
+def test_sem_look_ahead_scale_out():
+    df = build_synthetic(seed=33)
+    d = montar(df, P)
+    compra, venda = calcular_sinais(d[f"ma_{P['media_rapida']}"], d[f"ma_{P['media_lenta']}"],
+                                    d[f"ma_f_{P['media_filtro']}"], d["fechamento"])
+    eventos_full, _ = simular_posicao_scale_out(
+        d["abertura"], d["minima"], d[f"atr_{P['atr_periodo']}"], compra, venda,
+        P["atr_multiplicador"], fracao_saida_parcial=0.5,
+    )
+    corte = 800
+    eventos_parcial, _ = simular_posicao_scale_out(
+        d["abertura"][:corte], d["minima"][:corte], d[f"atr_{P['atr_periodo']}"][:corte],
+        compra[:corte], venda[:corte], P["atr_multiplicador"], fracao_saida_parcial=0.5,
+    )
+    eventos_full_norm = [(e[0], e[1]) for e in eventos_full if e[1] < corte]
+    eventos_parcial_norm = [(e[0], e[1]) for e in eventos_parcial]
+    assert eventos_full_norm == eventos_parcial_norm
+
+
+# ---------------------------------------------------------------------------
+# 6g) simular_posicao_scale_out_trailing: trailing so ativa APOS a parcial
+# ---------------------------------------------------------------------------
+def test_scale_out_trailing_stop_fixo_antes_da_parcial():
+    """Antes da saida parcial, o stop tem que ficar FIXO (igual ao scale_out
+    simples) -- o trailing so pode ativar depois da parcial."""
+    n = 6
+    abertura = np.full(n, 100.0)
+    minima = np.full(n, 99.0)
+    maxima = np.full(n, 101.0)
+    atr = np.full(n, 5.0)  # stop fixo = 100 - 3*5 = 85
+    compra = np.array([True] + [False] * (n - 1))
+    venda = np.zeros(n, dtype=bool)  # sem cruzamento -- so garante que o stop nao muda
+
+    eventos, estado = simular_posicao_scale_out_trailing(
+        abertura, minima, maxima, atr, compra, venda, multi_atr=3.0,
+        fracao_saida_parcial=0.5, mult_trailing=2.0,
+    )
+    assert eventos[0][3] == 85.0  # stop da entrada
+    assert estado["stop"] == 85.0  # nunca mudou (sem cruzamento pra ativar parcial/trailing)
+
+
+def test_scale_out_trailing_ativa_apos_parcial_e_stop_sobe():
+    """Depois da saida parcial, o trailing ativa e o stop deve subir conforme
+    o preco faz novas maximas."""
+    n = 12
+    abertura = np.array([100.0, 100.0, 100.0, 100.0, 105.0, 110.0, 115.0, 115.0, 115.0, 115.0, 115.0, 115.0])
+    minima = abertura - 1.0
+    maxima = abertura + 1.0
+    atr = np.full(n, 5.0)  # stop fixo original = 100-3*5=85
+    compra = np.array([True] + [False] * (n - 1))
+    # cruzamento no candle 3 (parcial) -- ATR congelado ali = 5.0
+    venda = np.array([False, False, False, True] + [False] * (n - 4))
+
+    eventos, estado = simular_posicao_scale_out_trailing(
+        abertura, minima, maxima, atr, compra, venda, multi_atr=3.0,
+        fracao_saida_parcial=0.5, mult_trailing=2.0,
+    )
+    assert eventos[1][0] == "saida_parcial"
+    # apos a parcial, maxima subiu ate 116 (maxima[6]=115+1), trail = 116 - 5*2 = 106 > stop fixo 85
+    assert estado["stop"] > 85.0
+    assert estado["trailing_ativo"]
+
+
+def test_scale_out_trailing_sai_quando_cai_alem_do_trail():
+    n = 14
+    abertura = np.array([100.0, 100.0, 100.0, 100.0, 110.0, 120.0, 120.0, 120.0, 110.0] + [110.0] * 5)
+    minima = abertura.copy()
+    maxima = abertura.copy()
+    minima[9] = 105.0  # despenca abaixo do trail apos a parcial
+    atr = np.full(n, 5.0)
+    compra = np.array([True] + [False] * (n - 1))
+    venda = np.array([False, False, False, True] + [False] * (n - 4))
+
+    eventos, estado = simular_posicao_scale_out_trailing(
+        abertura, minima, maxima, atr, compra, venda, multi_atr=3.0,
+        fracao_saida_parcial=0.5, mult_trailing=1.0,
+    )
+    tipos = [e[0] for e in eventos]
+    assert "saida_parcial" in tipos
+    assert tipos[-1] == "saida"
+    assert not estado["posicionado"]
+
+
+def test_sem_look_ahead_scale_out_trailing():
+    df = build_synthetic(seed=33)
+    d = montar(df, P)
+    compra, venda = calcular_sinais(d[f"ma_{P['media_rapida']}"], d[f"ma_{P['media_lenta']}"],
+                                    d[f"ma_f_{P['media_filtro']}"], d["fechamento"])
+    eventos_full, _ = simular_posicao_scale_out_trailing(
+        d["abertura"], d["minima"], d["maxima"], d[f"atr_{P['atr_periodo']}"], compra, venda,
+        P["atr_multiplicador"], fracao_saida_parcial=0.5, mult_trailing=2.0,
+    )
+    corte = 800
+    eventos_parcial, _ = simular_posicao_scale_out_trailing(
+        d["abertura"][:corte], d["minima"][:corte], d["maxima"][:corte], d[f"atr_{P['atr_periodo']}"][:corte],
+        compra[:corte], venda[:corte], P["atr_multiplicador"], fracao_saida_parcial=0.5, mult_trailing=2.0,
+    )
+    eventos_full_norm = [(e[0], e[1]) for e in eventos_full if e[1] < corte]
+    eventos_parcial_norm = [(e[0], e[1]) for e in eventos_parcial]
+    assert eventos_full_norm == eventos_parcial_norm
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,16 @@
+Cenario,haircut,Variante,P5_mult,P25_mult,Mediana_mult,P75_mult,P95_mult,Prob_perda_%,Mediana_USD
+Haircut 50% (metade do retorno),0.5,BuyHold,0.234,3.251,25.644,204.294,5432.314,14.3,256445.0
+Haircut 50% (metade do retorno),0.5,Base,0.692,4.251,19.849,89.419,1099.123,7.5,198485.53
+Haircut 50% (metade do retorno),0.5,BTC_Filtrado,0.718,4.41,19.571,89.504,1088.994,7.2,195708.7
+Haircut 50% (metade do retorno),0.5,FiltroVolume,0.978,4.556,16.96,65.579,662.711,5.1,169602.65
+Haircut 50% (metade do retorno),0.5,ScaleOut,0.602,3.378,14.603,64.847,678.776,9.4,146032.93
+Haircut 75% (um quarto),0.75,BuyHold,0.041,0.568,4.48,35.691,949.052,31.5,44802.21
+Haircut 75% (um quarto),0.75,FiltroVolume,0.254,1.185,4.41,17.053,172.329,21.6,44102.97
+Haircut 75% (um quarto),0.75,Base,0.144,0.886,4.135,18.63,228.997,26.7,41353.51
+Haircut 75% (um quarto),0.75,BTC_Filtrado,0.149,0.917,4.072,18.621,226.565,26.3,40717.25
+Haircut 75% (um quarto),0.75,ScaleOut,0.15,0.844,3.65,16.208,169.652,27.6,36499.12
+Haircut 90% (quase nada),0.9,FiltroVolume,0.113,0.528,1.966,7.6,76.803,36.5,19655.72
+Haircut 90% (quase nada),0.9,Base,0.056,0.346,1.614,7.269,89.351,41.6,16135.5
+Haircut 90% (quase nada),0.9,ScaleOut,0.065,0.367,1.588,7.054,73.834,41.9,15884.78
+Haircut 90% (quase nada),0.9,BTC_Filtrado,0.058,0.358,1.587,7.26,88.327,41.9,15873.74
+Haircut 90% (quase nada),0.9,BuyHold,0.014,0.199,1.573,12.53,333.176,44.2,15728.33

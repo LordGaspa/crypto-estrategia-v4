@@ -1,0 +1,6 @@
+Escala,Exposicao_mediana,Exposicao_max,Pct_dias_teto,Capital_SemTeto,CAGR_SemTeto_%,DD_SemTeto_%,Capital_ComTeto,CAGR_ComTeto_%,DD_ComTeto_%,Submerso_ComTeto_dias
+Base (1.0x sempre),0.488,1.0,0.0,226837.16,87.42,45.71,226837.16,87.42,45.71,732
+Filtrado (1.0/0.5),0.386,1.0,0.0,225662.01,87.23,39.89,225662.01,87.23,39.89,732
+Agressivo (1.5/1/0.5),0.466,1.5,28.4,612565.6,128.9,45.66,239380.95,89.46,45.1,758
+Escalado 2.0x bull,0.54,2.0,36.9,1265804.93,164.9,53.04,158585.01,74.4,51.08,827
+Escalado 2.5x bull,0.66,2.5,42.6,2253857.59,197.51,59.32,105938.65,60.8,54.57,841

@@ -1,0 +1,7 @@
+candidata,com_filtro_volume,timeframe,regime_tendencia,n_trades,net_pct_medio,net_pct_soma,win_rate_liquido_pct
+volume_puro,False,1d,bear,10,-4.9131,-49.1311,0.0
+volume_puro,False,1d,bull,13,0.1369,1.78,46.2
+volume_puro,False,1d,lateral,24,-1.5377,-36.9046,37.5
+volume_puro,False,4h,bear,48,1.3444,64.532,50.0
+volume_puro,False,4h,bull,44,0.616,27.1037,43.2
+volume_puro,False,4h,lateral,280,-0.6458,-180.8358,34.6

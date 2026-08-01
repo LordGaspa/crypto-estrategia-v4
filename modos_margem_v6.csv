@@ -1,0 +1,4 @@
+Modo,exige_margem,pct_dias_acima_100,exposicao_mediana,capital_final_spot,cagr_spot_pct,dd_spot_pct,capital_final_margem,cagr_margem_pct
+DEFENSIVO,nao,0.0,0.488,226837.16,87.42,45.71,226837.16,87.42
+FILTRADO,nao,0.0,0.386,225662.01,87.23,39.89,225662.01,87.23
+AGRESSIVO,sim,28.4,0.466,239380.95,89.46,45.10,612565.60,128.90

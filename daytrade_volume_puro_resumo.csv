@@ -1,0 +1,3 @@
+candidata,com_filtro_volume,timeframe,n_ativos,n_trades_total,trades_por_mes_medio,breakeven_pct,net_pct_medio,net_pct_mediano,win_rate_bruto_pct,win_rate_liquido_pct,imposto_custo_pct_mes,projecao_usd_mes_capital500,calmar_medio_base,net_pct_medio_estresse,projecao_usd_mes_estresse,n_ativos_significativos_p05,n_ativos_com_dados_suficientes
+volume_puro,False,1d,8,47,0.4,0.3,-1.7927,-4.2877,31.9,31.9,0.11,-3.19,-0.42,-3.8655,-6.34,0,8
+volume_puro,False,4h,8,372,2.8,0.3,-0.2398,-4.2877,37.9,37.6,0.84,-3.28,-0.272,-1.0629,-12.19,0,8

@@ -100,6 +100,255 @@ def simular_posicao(abertura, minima, atr, sinais_compra, sinais_venda, multi_at
     return eventos, estado_final
 
 
+def simular_posicao_filtro_adx(
+    abertura, minima, atr, adx, plus_di, minus_di, sinais_compra, sinais_venda, multi_atr,
+    adx_limiar=20.0, slippage=0.0,
+):
+    """Como simular_posicao, mas o cruzamento contrario SO fecha a posicao se
+    a forca da tendencia (ADX) ja tiver enfraquecido OU a tendencia forte for
+    de BAIXA (nao de alta). Motivacao (v6): a fraqueza conhecida da
+    RECEITA_ROBUSTA e sair cedo demais em bull forte — o cruzamento contrario
+    dispara em pullbacks temporarios dentro de uma tendencia de ALTA ainda
+    viva. Um filtro de forca de tendencia tenta distinguir "a tendencia
+    realmente acabou" (ADX baixo, honra o cruzamento) de "so um pullback
+    dentro de uma alta forte" (ADX alto E +DI>-DI, ignora o cruzamento e
+    segue posicionado ate o stop ATR).
+
+    CORRECAO (v6b) sobre a primeira versao: ADX sozinho mede so a FORCA da
+    tendencia, nao a direcao — uma queda forte tambem tem ADX alto. A
+    primeira versao (so ADX) mantinha posicoes compradas perdedoras presas
+    durante quedas fortes (ADX alto = "tendencia forte" foi mal-interpretado
+    como motivo pra nao sair), degradando o desempenho em BEAR. Agora exige
+    tambem que +DI > -DI (a tendencia forte tem que ser de ALTA) pra ignorar
+    o cruzamento — do contrario (tendencia forte de BAIXA, ou tendencia
+    fraca), o cruzamento contrario e honrado normalmente, protegendo o lado
+    defensivo.
+
+    Regras (identicas a simular_posicao, exceto o item 3):
+      1) Entrada: igual a simular_posicao — abertura[i]*(1+slippage), stop =
+         entrada - atr[i-1]*multi_atr.
+      2) Stop: furou a minima[i] < stop -> sai (mesma prioridade/preco de
+         simular_posicao), independente do ADX — o stop e proteção de risco,
+         nao deve ser filtrado por forca/direcao de tendencia.
+      3) Cruzamento contrario (sinais_venda[i-1]): SO e IGNORADO (posicao
+         continua aberta) se adx[i-1] >= adx_limiar E plus_di[i-1] >
+         minus_di[i-1] (tendencia forte E de alta). Em qualquer outro caso
+         (tendencia fraca, tendencia forte de baixa, ou indicadores nao
+         finitos no warm-up) o cruzamento e honrado normalmente — mesmo
+         comportamento conservador de simular_posicao.
+
+    Retorna os mesmos tipos que simular_posicao: (eventos, estado_final)."""
+    abertura = np.asarray(abertura)
+    minima = np.asarray(minima)
+    atr = np.asarray(atr)
+    adx = np.asarray(adx)
+    plus_di = np.asarray(plus_di)
+    minus_di = np.asarray(minus_di)
+    n = len(abertura)
+    eventos = []
+    posicionado = False
+    stop = 0.0
+    entrada_idx = None
+    entrada_preco = None
+
+    for i in range(1, n):
+        if not posicionado and sinais_compra[i - 1] and abertura[i] > 0:
+            entrada_preco = abertura[i] * (1 + slippage)
+            stop = entrada_preco - atr[i - 1] * multi_atr
+            entrada_idx = i
+            posicionado = True
+            eventos.append(("entrada", i, entrada_preco, stop))
+        elif posicionado:
+            furou_stop = minima[i] < stop
+            adx_ant, pdi_ant, mdi_ant = adx[i - 1], plus_di[i - 1], minus_di[i - 1]
+            indicadores_validos = np.isfinite(adx_ant) and np.isfinite(pdi_ant) and np.isfinite(mdi_ant)
+            tendencia_forte_de_alta = indicadores_validos and (adx_ant >= adx_limiar) and (pdi_ant > mdi_ant)
+            cruzou_venda = sinais_venda[i - 1] and not tendencia_forte_de_alta
+            if furou_stop or cruzou_venda:
+                preco_bruto = min(stop, abertura[i]) if furou_stop else abertura[i]
+                eventos.append(("saida", i, preco_bruto, stop))
+                posicionado = False
+
+    estado_final = {
+        "posicionado": posicionado,
+        "stop": stop if posicionado else None,
+        "entrada_idx": entrada_idx if posicionado else None,
+        "entrada_preco": entrada_preco if posicionado else None,
+    }
+    return eventos, estado_final
+
+
+def simular_posicao_scale_out(
+    abertura, minima, atr, sinais_compra, sinais_venda, multi_atr,
+    fracao_saida_parcial=0.5, slippage=0.0,
+):
+    """Como simular_posicao, mas o PRIMEIRO cruzamento contrario fecha so uma
+    FRACAO da posicao (fracao_saida_parcial), nao tudo — o resto continua
+    aberto com o MESMO stop ATR, sem depender de prever se o cruzamento foi
+    um pullback temporario ou uma reversao real (ao contrario do filtro ADX,
+    v6, que tentou prever isso e nao funcionou). Ideia: sempre realiza uma
+    parte do lucro no primeiro sinal de saida, mas deixa uma fracao "correr"
+    a tendencia se ela continuar.
+
+    Regras:
+      1) Entrada: igual a simular_posicao.
+      2) Stop: furou a minima[i] < stop -> fecha TODA a fracao restante de
+         uma vez (protecao de risco nao e parcial).
+      3) Cruzamento contrario (sinais_venda[i-1]):
+         - Se ainda nao houve saida parcial nesta posicao: fecha
+           fracao_saida_parcial da posicao original (evento "saida_parcial"),
+           mantem o resto aberto com o MESMO stop.
+         - Se ja houve saida parcial (so resta a fracao remanescente): um
+           NOVO cruzamento contrario fecha o restante todo (evento "saida"
+           normal).
+
+    Eventos: entrada = ("entrada", i, preco, stop) igual a simular_posicao.
+    Saida parcial = ("saida_parcial", i, preco, stop, fracao_fechada) onde
+    fracao_fechada e relativa ao tamanho ORIGINAL da posicao (ex.: 0.5).
+    Saida final = ("saida", i, preco, stop) fecha o que sobrou (seja 1.0 se
+    nunca teve saida parcial -- caso o stop bata primeiro -- ou o restante
+    apos a parcial).
+
+    estado_final ganha uma chave extra: "fracao_aberta" (1.0 se nunca saiu
+    parcial, senao 1.0 - fracao_saida_parcial, ou None se fechado)."""
+    abertura = np.asarray(abertura)
+    minima = np.asarray(minima)
+    atr = np.asarray(atr)
+    n = len(abertura)
+    eventos = []
+    posicionado = False
+    stop = 0.0
+    entrada_idx = None
+    entrada_preco = None
+    fracao_aberta = 0.0
+    ja_saiu_parcial = False
+
+    for i in range(1, n):
+        if not posicionado and sinais_compra[i - 1] and abertura[i] > 0:
+            entrada_preco = abertura[i] * (1 + slippage)
+            stop = entrada_preco - atr[i - 1] * multi_atr
+            entrada_idx = i
+            posicionado = True
+            fracao_aberta = 1.0
+            ja_saiu_parcial = False
+            eventos.append(("entrada", i, entrada_preco, stop))
+        elif posicionado:
+            furou_stop = minima[i] < stop
+            if furou_stop:
+                preco_bruto = min(stop, abertura[i])
+                eventos.append(("saida", i, preco_bruto, stop))
+                posicionado = False
+                fracao_aberta = 0.0
+            elif sinais_venda[i - 1]:
+                if not ja_saiu_parcial:
+                    eventos.append(("saida_parcial", i, abertura[i], stop, fracao_saida_parcial))
+                    fracao_aberta -= fracao_saida_parcial
+                    ja_saiu_parcial = True
+                else:
+                    eventos.append(("saida", i, abertura[i], stop))
+                    posicionado = False
+                    fracao_aberta = 0.0
+
+    estado_final = {
+        "posicionado": posicionado,
+        "stop": stop if posicionado else None,
+        "entrada_idx": entrada_idx if posicionado else None,
+        "entrada_preco": entrada_preco if posicionado else None,
+        "fracao_aberta": fracao_aberta if posicionado else None,
+    }
+    return eventos, estado_final
+
+
+def simular_posicao_scale_out_trailing(
+    abertura, minima, maxima, atr, sinais_compra, sinais_venda, multi_atr,
+    fracao_saida_parcial=0.5, mult_trailing=2.0, slippage=0.0,
+):
+    """Como simular_posicao_scale_out, mas a partir da saida parcial, a
+    fracao REMANESCENTE passa a usar um stop TRAILING (em vez do stop fixo
+    original) -- ideia: o trailing puro ja falhou na posicao INTEIRA (v3 e
+    Fase 2A), mas na metade que sobra depois de realizar lucro na primeira
+    metade, o contexto de risco e diferente (e "dinheiro que ja era lucro"),
+    entao um trailing mais apertado pode fazer sentido so nessa parte.
+
+    Regras:
+      1) Entrada: igual a simular_posicao. Stop fixo = entrada - atr[i-1]*multi_atr.
+      2) ANTES da saida parcial: comportamento identico a simular_posicao_scale_out
+         (stop fixo, cruzamento contrario fecha fracao_saida_parcial).
+      3) NO MOMENTO da saida parcial: o ATR daquele instante fica CONGELADO
+         (atr_pos_parcial) e o trailing e ativado imediatamente pra fracao
+         remanescente -- stop = max(stop_fixo_original, maxima_pos_parcial -
+         atr_pos_parcial * mult_trailing), so sobe.
+      4) DEPOIS da saida parcial: a fracao remanescente sai por trailing stop
+         (minima[i] < stop) OU por um SEGUNDO cruzamento contrario -- o que
+         vier primeiro (mesma prioridade de sempre: stop primeiro).
+
+    Retorna os mesmos tipos que simular_posicao_scale_out."""
+    abertura = np.asarray(abertura)
+    minima = np.asarray(minima)
+    maxima = np.asarray(maxima)
+    atr = np.asarray(atr)
+    n = len(abertura)
+    eventos = []
+    posicionado = False
+    stop = 0.0
+    entrada_idx = None
+    entrada_preco = None
+    fracao_aberta = 0.0
+    ja_saiu_parcial = False
+    trailing_ativo = False
+    atr_pos_parcial = 0.0
+    maxima_desde_parcial = 0.0
+
+    for i in range(1, n):
+        if not posicionado and sinais_compra[i - 1] and abertura[i] > 0:
+            entrada_preco = abertura[i] * (1 + slippage)
+            stop = entrada_preco - atr[i - 1] * multi_atr
+            entrada_idx = i
+            posicionado = True
+            fracao_aberta = 1.0
+            ja_saiu_parcial = False
+            trailing_ativo = False
+            eventos.append(("entrada", i, entrada_preco, stop))
+        elif posicionado:
+            if trailing_ativo:
+                if maxima[i] > maxima_desde_parcial:
+                    maxima_desde_parcial = maxima[i]
+                stop_trail = maxima_desde_parcial - atr_pos_parcial * mult_trailing
+                if stop_trail > stop:
+                    stop = stop_trail
+
+            furou_stop = minima[i] < stop
+            if furou_stop:
+                preco_bruto = min(stop, abertura[i])
+                eventos.append(("saida", i, preco_bruto, stop))
+                posicionado = False
+                fracao_aberta = 0.0
+                trailing_ativo = False
+            elif sinais_venda[i - 1]:
+                if not ja_saiu_parcial:
+                    eventos.append(("saida_parcial", i, abertura[i], stop, fracao_saida_parcial))
+                    fracao_aberta -= fracao_saida_parcial
+                    ja_saiu_parcial = True
+                    trailing_ativo = True
+                    atr_pos_parcial = float(atr[i - 1]) if np.isfinite(atr[i - 1]) else 0.0
+                    maxima_desde_parcial = maxima[i]
+                else:
+                    eventos.append(("saida", i, abertura[i], stop))
+                    posicionado = False
+                    fracao_aberta = 0.0
+                    trailing_ativo = False
+
+    estado_final = {
+        "posicionado": posicionado,
+        "stop": stop if posicionado else None,
+        "entrada_idx": entrada_idx if posicionado else None,
+        "entrada_preco": entrada_preco if posicionado else None,
+        "fracao_aberta": fracao_aberta if posicionado else None,
+        "trailing_ativo": trailing_ativo if posicionado else False,
+    }
+    return eventos, estado_final
+
+
 def simular_posicao_trailing(
     abertura, minima, maxima, atr,
     sinais_compra, sinais_venda,

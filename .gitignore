@@ -34,6 +34,17 @@ cache_dados/*
 !cache_dados/XRPUSDT_8h.parquet
 !cache_dados/ZECUSDT_4h.parquet
 
+# cache do sistema de day-trade (Fase 1, ver daytrade_config.py) - candles
+# intraday (5m/15m/1h), 8 ativos, ~85-95MB. Sem exceção nenhuma: essa fase não
+# tem alvo de deploy que justifique versionar cache, diferente do cache_dados/
+# acima (fallback do app_v4 no Streamlit Cloud).
+cache_dados_daytrade/
+
+# cache com coluna de volume (walkforward_v6i_volume_entrada.py) - o cache do v4
+# descarta volume, entao esse script mantem o proprio. Mesma logica: dado gerado,
+# nao versionar.
+cache_dados_v6i/
+
 # CSVs grandes de otimização (artefatos intermediários, não usados em tempo de execução pelo app_v4.py)
 otimizador_v2_robustez_*.csv
 otimizador_v3_trailing_*.csv
