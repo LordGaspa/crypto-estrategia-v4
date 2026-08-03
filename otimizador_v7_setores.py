@@ -115,14 +115,23 @@ def rodar_ativo(ativo: str, interval_str: str, comb_base: list, idx_cols: list, 
                 "Sharpe": res["sharpe"],
             })
 
-    if not resultados:
-        print(f"    [SEM COMBINACOES VALIDAS] {ativo}")
+    # grade esparsa demais nao sustenta analise de consistencia -- o Score de
+    # Robustez depende de ter vizinhos na grade. Acontece com ativo de
+    # historico curto em timeframe longo (ex.: BONK em 12h).
+    MIN_COMBOS_UTEIS = 500
+    if len(resultados) < MIN_COMBOS_UTEIS:
+        print(f"    [GRADE ESPARSA] {ativo} {interval_str}: so {len(resultados)} combos validos "
+              f"(min {MIN_COMBOS_UTEIS}) -- pulando, historico curto demais pra este timeframe",
+              flush=True)
         return None
 
     d = pd.DataFrame(resultados)
     d["Score_Robustez"] = calcular_score_robustez(d, idx_cols, "Calmar")
-    d["Rank_Calmar"] = d["Calmar"].rank(ascending=False, method="min").astype(int)
-    d["Rank_Robustez"] = d["Score_Robustez"].rank(ascending=False, method="min").astype(int)
+    # Int64 (nullable) em vez de int: numa grade esparsa (ativo com historico
+    # curto num timeframe longo), combinacoes sem vizinhos ficam com
+    # Score_Robustez NaN -- e o rank dessas tambem e NaN. astype(int) quebrava.
+    d["Rank_Calmar"] = d["Calmar"].rank(ascending=False, method="min").astype("Int64")
+    d["Rank_Robustez"] = d["Score_Robustez"].rank(ascending=False, method="min").astype("Int64")
     d = d.sort_values("Calmar", ascending=False)
     d.to_csv(f"{PREFIXO}{ativo}_{interval_str}.csv", index=False)
 

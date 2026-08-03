@@ -54,3 +54,7 @@ otimizador_v4_[A-Z0-9]*USDT.csv
 .streamlit/secrets.toml
 *.lock
 *.log
+
+# grades do otimizador setorial v7 (172 arquivos, ~2.8MB cada) - saida gerada,
+# regeneravel com otimizador_v7_setores.py. Os CSVs de RESUMO/analise sim vao pro repo.
+otimizador_v7_[A-Z0-9]*USDT_*.csv
