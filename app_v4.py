@@ -50,8 +50,26 @@ from estrategia_core import estado_posicao_atual
 st.set_page_config(page_title="Estratégia V4 - Radar & Portfólio", layout="wide", page_icon="📡")
 alt.data_transformers.disable_max_rows()  # séries de anos em 4h passam do limite padrão (5000 linhas)
 
-RESUMO_CSV = "otimizador_v4_RESUMO_ATIVOS.csv"  # manifesto: lista de ativos, interval, grupo, DSR
-DSR_ALERTA_LIMITE = 5.0  # % — abaixo disso, aviso de "sem significância estatística"
+RESUMO_CSV = "otimizador_v4_RESUMO_ATIVOS.csv"  # manifesto: lista de ativos, interval, grupo
+
+# Significância estatística por ativo, medida sobre a RECEITA_ROBUSTA — a
+# estratégia que o app realmente executa (walkforward_robusta_v4.py, bootstrap
+# do Sharpe em 2000 reamostragens).
+#
+# ANTES o app usava o Deflated Sharpe Ratio (DSR) do otimizador_v4 pra este
+# aviso, e estava ERRADO por dois motivos:
+#   1. O DSR é calculado para os parâmetros OTIMIZADOS POR ATIVO — que o app
+#      não usa desde a migração para a RECEITA_ROBUSTA. Era a estatística de
+#      uma estratégia diferente da que gera os sinais na tela.
+#   2. O DSR penaliza por múltiplas tentativas (28.035 combinações do grid).
+#      Essa penalidade NÃO se aplica à receita robusta, que é fixa por grupo e
+#      nunca foi escolhida olhando o ativo — não houve busca, logo não há o
+#      viés que o DSR corrige.
+# Resultado prático: SOL aparecia como "sem significância (DSR 0,0%)" quando o
+# bootstrap da receita que realmente roda dá p = 0,000 (altamente significativo).
+BOOTSTRAP_CSV = "walkforward_robusta_v4_resumo.csv"
+P_VALOR_LIMITE = 0.05   # p >= isso: não confirmado estatisticamente
+MIN_JANELAS_CONFIAVEL = 4  # menos que isso, a amostra é curta demais pra concluir
 # (os antigos CSVs de portfólio/pesos não são mais lidos: tudo é calculado ao
 #  vivo pela receita robusta em computar_portfolio_robusto)
 
@@ -172,6 +190,45 @@ def carregar_fronteira():
         return df[df["Estrategia"] != "BTC-Defensivo"].reset_index(drop=True)
     except FileNotFoundError:
         return None
+
+
+@st.cache_data
+def carregar_bootstrap():
+    """Significância por ativo da RECEITA_ROBUSTA (a estratégia que roda).
+    Indexado por Ativo; colunas relevantes: Sharpe_boot, P_value_boot, N_Janelas."""
+    try:
+        return pd.read_csv(BOOTSTRAP_CSV).set_index("Ativo")
+    except FileNotFoundError:
+        return None
+
+
+def _avaliar_significancia(boot_df, ativo: str) -> dict | None:
+    """Traduz o bootstrap num veredito legível. Devolve None se não há dado.
+
+    Três estados possíveis, nesta ordem de prioridade:
+      - amostra_curta: menos de MIN_JANELAS_CONFIAVEL janelas anuais -> não dá
+        pra concluir nada, nem a favor nem contra (é o caso dos ativos
+        listados há pouco tempo);
+      - nao_confirmado: janelas suficientes, mas p >= 0,05;
+      - confirmado: p < 0,05.
+    """
+    if boot_df is None or ativo not in boot_df.index:
+        return None
+    r = boot_df.loc[ativo]
+    p = r.get("P_value_boot")
+    sharpe = r.get("Sharpe_boot")
+    n_jan = r.get("N_Janelas")
+    if pd.isna(p):
+        return None
+    n_jan = int(n_jan) if pd.notna(n_jan) else 0
+    if n_jan < MIN_JANELAS_CONFIAVEL:
+        estado = "amostra_curta"
+    elif p < P_VALOR_LIMITE:
+        estado = "confirmado"
+    else:
+        estado = "nao_confirmado"
+    return {"estado": estado, "p": float(p), "n_janelas": n_jan,
+            "sharpe": float(sharpe) if pd.notna(sharpe) else None}
 
 
 @st.cache_data
@@ -429,36 +486,98 @@ def computar_portfolio_robusto():
     }
 
 
-def grafico_area(df: pd.DataFrame, altura: int = 320):
-    """Gráfico de área empilhada=NÃO (overlay), com preenchimento semi-
-    transparente sob a linha — uma cor pra Estratégia, outra pra Buy&Hold."""
-    df_long = df.reset_index(names="Data").melt("Data", var_name="Série", value_name="Capital")
-    escala_cores = alt.Scale(domain=["Estrategia", "Buy&Hold"], range=[COR_ESTRATEGIA, COR_BUYHOLD])
+def grafico_area(df: pd.DataFrame, altura: int = 340, inicio_holdout=None, titulo: str = None):
+    """Curva de capital Estratégia vs Buy&Hold.
 
-    area = (
-        alt.Chart(df_long)
-        .mark_area(opacity=0.28, interpolate="monotone", line=False)
-        .encode(
-            x=alt.X("Data:T", title=None),
-            y=alt.Y("Capital:Q", stack=None, title="Capital (USD)"),
-            color=alt.Color("Série:N", scale=escala_cores, legend=alt.Legend(title=None, orient="top")),
+    Rótulos em INGLÊS de propósito: o usuário tira print desses gráficos pra
+    publicar (ex.: Binance), e público internacional entende sem tradução.
+
+    Tooltip mostra o capital em USD **e** o retorno % desde o início da janela
+    — é o % que torna a comparação com o Buy&Hold imediata (US$ 1.394 não diz
+    nada sozinho; "+39,4%" ao lado de "+12,1%" diz tudo).
+
+    `inicio_holdout`: se informado, sombreia a região de holdout e desenha uma
+    linha divisória rotulada — deixa óbvio no print o que é dado fora da amostra.
+    """
+    df = df.rename(columns={"Estrategia": "Strategy", "Buy&Hold": "Buy & Hold"})
+    base_valores = df.iloc[0]
+    df_pct = (df / base_valores - 1.0) * 100.0
+
+    df_long = (
+        df.reset_index(names="Date")
+        .melt("Date", var_name="Series", value_name="Capital")
+        .merge(
+            df_pct.reset_index(names="Date").melt("Date", var_name="Series", value_name="Return"),
+            on=["Date", "Series"],
         )
     )
-    linha = (
-        alt.Chart(df_long)
-        .mark_line(interpolate="monotone", strokeWidth=2.2)
-        .encode(
-            x="Data:T",
-            y=alt.Y("Capital:Q", stack=None),
-            color=alt.Color("Série:N", scale=escala_cores, legend=None),
-        )
+
+    escala_cores = alt.Scale(domain=["Strategy", "Buy & Hold"], range=[COR_ESTRATEGIA, COR_BUYHOLD])
+    eixo_x = alt.X("Date:T", title=None, axis=alt.Axis(format="%b %Y", labelAngle=0))
+    eixo_y = alt.Y("Capital:Q", stack=None, title="Capital (USD)",
+                   axis=alt.Axis(format="~s"))
+
+    base = alt.Chart(df_long)
+    area = base.mark_area(opacity=0.22, interpolate="monotone", line=False).encode(
+        x=eixo_x, y=eixo_y,
+        color=alt.Color("Series:N", scale=escala_cores,
+                        legend=alt.Legend(title=None, orient="top", symbolType="stroke")),
     )
+    linha = base.mark_line(interpolate="monotone", strokeWidth=2.4).encode(
+        x=eixo_x, y=eixo_y, color=alt.Color("Series:N", scale=escala_cores, legend=None),
+    )
+
+    # hover: régua vertical + pontos + tooltip com USD e %
+    hover = alt.selection_point(fields=["Date"], nearest=True, on="pointerover",
+                                 empty=False, clear="pointerout")
+    seletor = base.mark_rule(opacity=0).encode(x=eixo_x).add_params(hover)
+    regua = base.mark_rule(color="#94a3b8", strokeWidth=1).encode(x=eixo_x).transform_filter(hover)
+    pontos = base.mark_circle(size=70).encode(
+        x=eixo_x, y=eixo_y,
+        color=alt.Color("Series:N", scale=escala_cores, legend=None),
+        opacity=alt.condition(hover, alt.value(1), alt.value(0)),
+        tooltip=[
+            alt.Tooltip("Date:T", title="Date", format="%d %b %Y"),
+            alt.Tooltip("Series:N", title="Series"),
+            alt.Tooltip("Capital:Q", title="Capital (USD)", format=",.0f"),
+            alt.Tooltip("Return:Q", title="Return", format="+.2f"),
+        ],
+    )
+
+    camadas = [area, linha, seletor, regua, pontos]
+
+    if inicio_holdout is not None:
+        marca = pd.DataFrame({"Date": [pd.Timestamp(inicio_holdout)]})
+        fim = pd.DataFrame({"Date": [pd.Timestamp(inicio_holdout)],
+                            "Date2": [pd.Timestamp(df.index[-1])]})
+        sombra = (
+            alt.Chart(fim)
+            .mark_rect(opacity=0.10, color="#e2e8f0")
+            .encode(x="Date:T", x2="Date2:T")
+        )
+        divisor = (
+            alt.Chart(marca)
+            .mark_rule(color="#e2e8f0", strokeDash=[5, 4], strokeWidth=1.5)
+            .encode(x="Date:T")
+        )
+        rotulo = (
+            alt.Chart(marca)
+            .mark_text(text="Holdout (out-of-sample)", align="left", dx=6, dy=-6,
+                       baseline="top", color="#cbd5e1", fontSize=11, fontWeight=600)
+            .encode(x="Date:T")
+        )
+        camadas = [sombra] + camadas + [divisor, rotulo]
+
+    grafico = alt.layer(*camadas).properties(height=altura, background="transparent")
+    if titulo:
+        grafico = grafico.properties(title=alt.TitleParams(
+            titulo, color="#e2e8f0", fontSize=13, fontWeight=600, anchor="start", offset=8))
     return (
-        (area + linha)
-        .properties(height=altura, background="transparent")
-        .configure_axis(gridColor="#262d3d", domainColor="#3a4256", labelColor="#9aa4b8", titleColor="#9aa4b8")
+        grafico
+        .configure_axis(gridColor="#262d3d", domainColor="#3a4256",
+                        labelColor="#9aa4b8", titleColor="#9aa4b8", labelFontSize=11)
         .configure_view(strokeWidth=0)
-        .configure_legend(labelColor="#e5e7eb")
+        .configure_legend(labelColor="#e5e7eb", labelFontSize=12)
     )
 
 
@@ -812,25 +931,34 @@ with st.expander("📊 Validação Multi-Regime — o que a estratégia faz bem 
         # Gráfico de distribuição
         st.markdown("#### Distribuição dos retornos anuais (estratégia vs B&H)")
         df_dist = df_wf[["Retorno_%", "BH_%"]].copy()
-        df_dist = df_dist.rename(columns={"Retorno_%": "Estratégia", "BH_%": "Buy&Hold"})
-        df_melt = df_dist.melt(var_name="Série", value_name="Retorno (%)")
+        # rótulos em inglês, mesmo padrão dos gráficos de capital (o usuário
+        # tira print destes gráficos pra publicar)
+        df_dist = df_dist.rename(columns={"Retorno_%": "Strategy", "BH_%": "Buy & Hold"})
+        df_melt = df_dist.melt(var_name="Series", value_name="Return")
         if not df_melt.empty:
             hist = (
                 alt.Chart(df_melt)
-                .mark_bar(opacity=0.6, binSpacing=1)
+                .mark_bar(opacity=0.65, binSpacing=1)
                 .encode(
-                    x=alt.X("Retorno (%):Q", bin=alt.Bin(maxbins=40), title="Retorno anual (%)"),
-                    y=alt.Y("count():Q", title="Nº de janelas-ativo"),
+                    x=alt.X("Return:Q", bin=alt.Bin(maxbins=40), title="Annual return (%)"),
+                    y=alt.Y("count():Q", title="Asset-year windows"),
                     color=alt.Color(
-                        "Série:N",
-                        scale=alt.Scale(domain=["Estratégia", "Buy&Hold"], range=[COR_ESTRATEGIA, COR_BUYHOLD]),
+                        "Series:N",
+                        scale=alt.Scale(domain=["Strategy", "Buy & Hold"], range=[COR_ESTRATEGIA, COR_BUYHOLD]),
                         legend=alt.Legend(title=None, orient="top"),
                     ),
+                    tooltip=[
+                        alt.Tooltip("Series:N", title="Series"),
+                        alt.Tooltip("count():Q", title="Windows"),
+                    ],
                 )
-                .properties(height=220, background="transparent")
-                .configure_axis(gridColor="#262d3d", labelColor="#9aa4b8")
+                .properties(height=230, background="transparent",
+                            title=alt.TitleParams("Annual return distribution — 115 asset-year windows",
+                                                   color="#e2e8f0", fontSize=13, fontWeight=600,
+                                                   anchor="start", offset=8))
+                .configure_axis(gridColor="#262d3d", labelColor="#9aa4b8", titleColor="#9aa4b8")
                 .configure_view(strokeWidth=0)
-                .configure_legend(labelColor="#e5e7eb")
+                .configure_legend(labelColor="#e5e7eb", labelFontSize=12)
             )
             st.altair_chart(hist, use_container_width=True)
 
@@ -840,11 +968,16 @@ st.divider()
 st.header("Radar de Sinais (22 ativos)")
 st.caption(
     "🟢 ALTA = posicionado agora · 🔴 BAIXA = fora do mercado · ordenado pela data do último "
-    "cruzamento que gerou o sinal atual (mais recente primeiro)."
+    "cruzamento que gerou o sinal atual (mais recente primeiro). O selo de significância em cada "
+    "card vem do **bootstrap do Sharpe da receita robusta** (a estratégia que gera estes sinais), "
+    "não do DSR dos parâmetros otimizados — que o app não usa."
 )
 
 if "ativo_selecionado" not in st.session_state:
     st.session_state["ativo_selecionado"] = None
+
+# significância medida sobre a receita que realmente roda (ver BOOTSTRAP_CSV)
+boot_df = carregar_bootstrap()
 
 # pré-computa sinal de todos os ativos pra poder ordenar os cards por data.
 # Os sinais usam a RECEITA OURO ROBUSTA do grupo do ativo (veterana/nova) — NÃO
@@ -912,13 +1045,26 @@ for bloco in blocos:
                         {chip_html(f"peso {peso:.2f}%" if peso is not None else "peso n/d", "#64748b")}
                     </div>
                 """
-                dsr_pct = row["DSR_%"]
-                if pd.notna(dsr_pct) and dsr_pct < DSR_ALERTA_LIMITE:
-                    html += f"""
-                    <div class="dsr-aviso" style="background:{COR_DSR_ALERTA}22; color:{COR_DSR_ALERTA}; border:1px solid {COR_DSR_ALERTA}55;">
-                        ⚠️ Poucos trades no histórico — backtest sem significância estatística (DSR {dsr_pct:.1f}%); tratar com cautela
-                    </div>
-                    """
+                sig = _avaliar_significancia(boot_df, ativo)
+                if sig is not None:
+                    if sig["estado"] == "confirmado":
+                        html += f"""
+                        <div class="dsr-aviso" style="background:{COR_ALTA}18; color:{COR_ALTA}; border:1px solid {COR_ALTA}44;">
+                            ✅ Edge confirmado no histórico — Sharpe {sig['sharpe']:+.2f}, p={sig['p']:.3f} ({sig['n_janelas']} janelas anuais)
+                        </div>
+                        """
+                    elif sig["estado"] == "amostra_curta":
+                        html += f"""
+                        <div class="dsr-aviso" style="background:{COR_DSR_ALERTA}22; color:{COR_DSR_ALERTA}; border:1px solid {COR_DSR_ALERTA}55;">
+                            ⚠️ Histórico curto ({sig['n_janelas']} janela{'s' if sig['n_janelas'] != 1 else ''} anual) — sem dados suficientes pra confirmar ou descartar o edge
+                        </div>
+                        """
+                    else:
+                        html += f"""
+                        <div class="dsr-aviso" style="background:{COR_DSR_ALERTA}22; color:{COR_DSR_ALERTA}; border:1px solid {COR_DSR_ALERTA}55;">
+                            ⚠️ Edge não confirmado — p={sig['p']:.3f} (acima de 0,05) em {sig['n_janelas']} janelas; tratar com cautela
+                        </div>
+                        """
                 html += "</div>"
                 html = "\n".join(linha.strip() for linha in html.strip().splitlines())
                 st.markdown(html, unsafe_allow_html=True)
@@ -947,18 +1093,37 @@ else:
     c2.metric("Peso no portfólio", f"{pesos_map.get(ativo_sel, float('nan')):.2f}%")
     c3.metric("Média lenta / filtro", f"{params['media_lenta']}/{params['media_filtro']}")
     c4.metric("ATR", f"{params['atr_periodo']}×{params['atr_multiplicador']}")
-    dsr_ativo = row["DSR_%"]
-    if pd.notna(dsr_ativo) and dsr_ativo < DSR_ALERTA_LIMITE:
-        st.caption(f"⚠️ Poucos trades no histórico — backtest sem significância estatística "
-                   f"(DSR {dsr_ativo:.1f}%). Os sinais existem, mas trate com cautela extra.")
+    sig_sel = _avaliar_significancia(boot_df, ativo_sel)
+    if sig_sel is not None:
+        if sig_sel["estado"] == "confirmado":
+            st.success(
+                f"✅ **Edge confirmado**: Sharpe {sig_sel['sharpe']:+.2f} com p={sig_sel['p']:.3f} "
+                f"(bootstrap de 2.000 reamostragens sobre {sig_sel['n_janelas']} janelas anuais da "
+                f"receita robusta). Significa que o resultado dificilmente é sorte."
+            )
+        elif sig_sel["estado"] == "amostra_curta":
+            st.warning(
+                f"⚠️ **Histórico curto**: só {sig_sel['n_janelas']} janela(s) anual(is) disponível(is). "
+                f"Não dá pra confirmar nem descartar o edge — os sinais existem, mas sem lastro "
+                f"estatístico ainda."
+            )
+        else:
+            st.warning(
+                f"⚠️ **Edge não confirmado**: p={sig_sel['p']:.3f} (acima do limite de 0,05) em "
+                f"{sig_sel['n_janelas']} janelas anuais. O retorno histórico pode ser sorte — "
+                f"tratar com cautela extra."
+            )
     st.caption(
         f"Parâmetros em uso: rápida={params['media_rapida']} · lenta={params['media_lenta']} · "
         f"filtro={params['media_filtro']} · ATR={params['atr_periodo']}×{params['atr_multiplicador']} · "
         f"Grupo: {info_liq['grupo']} (taxa {info_liq['taxa']*100:.2f}% + slippage {info_liq['slippage']*100:.3f}%)"
     )
 
-    # ---- Gráfico com CALENDÁRIO (janela personalizada) ----
-    st.markdown("### 🗓️ Janela personalizada (escolha o período)")
+    # ---- Gráfico principal: histórico completo, com holdout demarcado ----
+    # (antes o padrão era abrir no holdout, o que deixava este gráfico IDÊNTICO
+    #  ao "holdout oficial" logo abaixo — duplicação sem motivo. Abrindo no
+    #  histórico inteiro, os dois passam a mostrar coisas diferentes.)
+    st.markdown("### 📈 Evolução do capital")
     df_datas = carregar_dados(ativo_sel, interval_sel)
     if df_datas is None or df_datas.empty:
         st.info("Sem dados de preço pra este ativo.")
@@ -966,21 +1131,23 @@ else:
         datas_all = pd.to_datetime(df_datas["t_abert"])
         dmin, dmax = datas_all.min().date(), datas_all.max().date()
         periodos_a = separar_periodos(datas_all)
-        default_ini = periodos_a["holdout_inicio"].date() if periodos_a["holdout_inicio"] is not None else dmin
+        inicio_hold = (periodos_a["holdout_inicio"].date()
+                       if periodos_a["holdout_inicio"] is not None else None)
 
         colcal1, colcal2 = st.columns([2, 1])
         with colcal1:
             intervalo = st.date_input(
-                "Período de comparação",
-                value=(default_ini, dmax),
+                "Período exibido",
+                value=(dmin, dmax),
                 min_value=dmin,
                 max_value=dmax,
                 key=f"cal_{ativo_sel}",
                 format="DD/MM/YYYY",
             )
         with colcal2:
-            st.caption("Padrão = período de holdout (12 meses fora da amostra). "
-                       "Arraste no calendário pra qualquer janela — tudo recalcula.")
+            st.caption("Padrão = histórico completo. A faixa sombreada à direita é o "
+                       "holdout (12 meses fora da amostra). Arraste as datas pra "
+                       "recalcular em qualquer janela.")
 
         if isinstance(intervalo, (list, tuple)) and len(intervalo) == 2:
             data_ini, data_fim = intervalo
@@ -1005,31 +1172,51 @@ else:
                     f"· Calmar {calmar_txt} · indicadores aquecidos com o histórico anterior à janela "
                     f"(capital recomeça em ${CAPITAL_INICIAL:.0f} no início do período escolhido)."
                 )
-                st.altair_chart(grafico_area(df_janela), use_container_width=True)
+                # só marca o holdout se ele estiver DENTRO da janela exibida
+                marca_hold = None
+                if inicio_hold is not None and data_ini < inicio_hold < data_fim:
+                    marca_hold = inicio_hold
+                st.altair_chart(
+                    grafico_area(
+                        df_janela, altura=380, inicio_holdout=marca_hold,
+                        titulo=f"{ativo_sel} · {interval_sel} — Strategy vs Buy & Hold",
+                    ),
+                    use_container_width=True,
+                )
         else:
             st.info("Escolha as duas datas (início e fim) no calendário acima.")
 
     # ---- Janelas oficiais fixas (dev | holdout), pra referência ----
-    st.markdown("### Janelas oficiais (referência) — Desenvolvimento vs Holdout")
-    with st.spinner("Reconstruindo curvas de capital..."):
-        df_dev, df_holdout = curva_capital(ativo_sel, interval_sel, params, info_liq["taxa"], info_liq["slippage"])
+    # Recolhidas num expander: metodologia DIFERENTE do gráfico acima (cada
+    # período recomeça em 1000 e calcula indicadores isoladamente, sem aquecer
+    # com o histórico anterior). São os números oficiais de validação — ficam
+    # disponíveis, mas sem competir visualmente com o gráfico principal.
+    with st.expander("🔬 Janelas oficiais de validação (metodologia isolada)", expanded=False):
+        st.caption(
+            "Diferente do gráfico acima: aqui cada período é simulado do zero (capital recomeça "
+            f"em ${CAPITAL_INICIAL:.0f} e os indicadores são calculados só com dados daquele "
+            "período, sem aquecimento). São os números oficiais de validação — por isso podem "
+            "diferir um pouco do gráfico principal."
+        )
+        with st.spinner("Reconstruindo curvas de capital..."):
+            df_dev, df_holdout = curva_capital(ativo_sel, interval_sel, params, info_liq["taxa"], info_liq["slippage"])
 
-    col_g1, col_g2 = st.columns(2)
-    with col_g1:
-        st.markdown("**Período de Desenvolvimento** — Estratégia vs Buy&Hold")
-        if df_dev is not None:
-            st.altair_chart(grafico_area(df_dev), use_container_width=True)
-        else:
-            st.info("Sem dados suficientes de desenvolvimento pra este ativo.")
-    with col_g2:
-        st.markdown("**Holdout (últimos 12 meses)** — Estratégia vs Buy&Hold 🔒")
-        if df_holdout is not None:
-            st.altair_chart(grafico_area(df_holdout), use_container_width=True)
-        else:
-            st.info("Sem dados de holdout pra este ativo ainda.")
-
-    st.caption(
-        "As duas janelas acima usam a receita robusta do grupo, com indicadores calculados "
-        "isoladamente em cada período (sem aquecer com o histórico anterior) — por isso podem "
-        "diferir um pouco da janela personalizada do calendário, que aquece os indicadores."
-    )
+        col_g1, col_g2 = st.columns(2)
+        with col_g1:
+            st.markdown("**Desenvolvimento** — onde a receita foi derivada")
+            if df_dev is not None:
+                st.altair_chart(
+                    grafico_area(df_dev, altura=260, titulo="Development period"),
+                    use_container_width=True,
+                )
+            else:
+                st.info("Sem dados suficientes de desenvolvimento pra este ativo.")
+        with col_g2:
+            st.markdown("**Holdout** 🔒 — 12 meses nunca vistos na derivação")
+            if df_holdout is not None:
+                st.altair_chart(
+                    grafico_area(df_holdout, altura=260, titulo="Holdout (out-of-sample)"),
+                    use_container_width=True,
+                )
+            else:
+                st.info("Sem dados de holdout pra este ativo ainda.")

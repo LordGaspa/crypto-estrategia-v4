@@ -355,9 +355,18 @@ def main():
             "Pior_%": round(float(np.min(ret_arr)), 2),
             "Melhor_%": round(float(np.max(ret_arr)), 2),
             "Pct_Positivas": round(n_pos / n_jan * 100, 1),
-            "Sharpe_boot": round(bstrap.get("sharpe_obs") or 0, 3),
-            "Sharpe_P5": round(bstrap.get("p5") or 0, 3) if bstrap.get("p5") is not None else None,
-            "P_value_boot": round(bstrap.get("p_value") or 1, 3) if bstrap.get("p_value") is not None else None,
+            # BUG CORRIGIDO: antes era `bstrap.get("p_value") or 1`. Em Python
+            # 0.0 e FALSY, entao um p-value de 0.000 (o mais significativo
+            # possivel) virava 1.000 (o menos significativo) -- invertendo
+            # completamente a leitura. BNB aparecia com p=1.000 e Sharpe 1.446,
+            # combinacao matematicamente impossivel. Mesmo problema em
+            # sharpe_obs/p5. Agora usa checagem explicita de None.
+            "Sharpe_boot": (round(bstrap["sharpe_obs"], 3)
+                            if bstrap.get("sharpe_obs") is not None else None),
+            "Sharpe_P5": (round(bstrap["p5"], 3)
+                          if bstrap.get("p5") is not None else None),
+            "P_value_boot": (round(bstrap["p_value"], 4)
+                             if bstrap.get("p_value") is not None else None),
             "P_wilcoxon": round(p_wilcoxon, 3) if p_wilcoxon is not None else None,
         }
         linhas_resumo.append(resumo_ativo)
@@ -483,10 +492,13 @@ def main():
     print("  " + "-" * 70)
     for row in linhas_resumo:
         p5_str = f"{row['Sharpe_P5']:+.2f}" if row["Sharpe_P5"] is not None else "   N/A"
-        pv_str = f"{row['P_value_boot']:.2f}" if row["P_value_boot"] is not None else "  N/A"
+        pv_str = f"{row['P_value_boot']:.3f}" if row["P_value_boot"] is not None else "   N/A"
+        sh_str = f"{row['Sharpe_boot']:+.2f}" if row["Sharpe_boot"] is not None else "  N/A"
+        sig = " *" if (row["P_value_boot"] is not None and row["P_value_boot"] < 0.05) else "  "
         print(f"  {row['Ativo']:<18} {row['Grupo']:<10} {row['Mediana_%']:>+7.1f} "
               f"{row['Pior_%']:>+7.1f} {row['Pct_Positivas']:>5.0f}% "
-              f"{row['Sharpe_boot']:>7.2f} {p5_str:>7} {pv_str:>6}")
+              f"{sh_str:>7} {p5_str:>7} {pv_str:>7}{sig}")
+    print("\n  (* = Sharpe significativo a p < 0.05 no bootstrap)")
 
     print(f"\n\nSalvo: walkforward_robusta_v4_janelas.csv  ({len(df_jan)} linhas)")
     print(f"Salvo: walkforward_robusta_v4_resumo.csv   ({len(df_res)} ativos)")

@@ -160,6 +160,24 @@ avaliar qualquer variante daqui pra frente:
    `carregar_modos_margem()` em `app_v4.py`). Custo de juros e risco de liquidação **não estão
    modelados em lugar nenhum do projeto**.
 
+### Significância estatística no app — qual número usar (2026-08-06)
+O app **não** usa mais o Deflated Sharpe Ratio (DSR) do `otimizador_v4` para o selo de
+significância dos cards. Motivo: o DSR é calculado para os **parâmetros otimizados por ativo**,
+que o app não usa desde a migração para a `RECEITA_ROBUSTA`, e penaliza por 28.035 tentativas de
+grid search — penalidade que não se aplica a uma receita fixa por grupo, que nunca foi escolhida
+olhando o ativo. Resultado do erro: SOL aparecia como "poucos trades, sem significância (DSR
+0,0%)" quando o bootstrap da receita que realmente roda dá **p = 0,000**.
+Agora o selo vem de `walkforward_robusta_v4_resumo.csv` (bootstrap do Sharpe, 2.000 reamostragens,
+sobre a `RECEITA_ROBUSTA`), com três estados: confirmado (p<0,05), não confirmado (p≥0,05) e
+amostra curta (<4 janelas anuais — não dá pra concluir nada). Ver `_avaliar_significancia()` em
+`app_v4.py`.
+
+**Bug corrigido no mesmo dia** (`walkforward_robusta_v4.py`): o idioma `bstrap.get("p_value") or 1`
+convertia um p-value de `0.0` (o mais significativo possível) em `1.0` (o menos significativo),
+porque `0.0` é falsy em Python. BNB aparecia com p=1,000 e Sharpe +1,446 — combinação
+matematicamente impossível. Trocado por checagem explícita de `None`. Ao mexer nesse arquivo,
+cuidado com esse padrão em qualquer campo numérico que possa ser zero legítimo.
+
 ## Testes
 `tests/test_estrategia_core.py` (a estratégia v4/v5 viva) e `tests/test_daytrade_core.py` (linha
 descartada) seguem a mesma disciplina: sinal de cruzamento+filtro, **sem look-ahead** (sinal
