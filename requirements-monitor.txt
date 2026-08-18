@@ -1,0 +1,14 @@
+# Dependencias MINIMAS do monitor_sinais.py (servidor 24/7).
+#
+# Deliberadamente NAO inclui streamlit, altair, scipy nem as libs de grafico:
+# o monitor so calcula sinais e manda e-mail, nao renderiza nada. Instalar a
+# lista completa num servidor ARM (Oracle Ampere) levaria muito mais tempo e
+# tem mais chance de falhar compilando -- essas 4 tem wheel pronta pra ARM.
+#
+# Uso:  pip install -r requirements-monitor.txt
+
+pandas==3.0.5
+numpy==2.5.1
+python-binance==1.0.37
+python-dateutil==2.9.0.post0
+pyarrow==24.0.0
