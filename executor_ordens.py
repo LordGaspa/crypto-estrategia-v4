@@ -216,6 +216,8 @@ class Corretora(Protocol):
     def preco(self, symbol: str) -> Decimal: ...
     def saldo(self, ativo: str) -> Decimal: ...
     def buscar_ordem(self, symbol: str, client_order_id: str) -> Optional[dict]: ...
+    def listar_ordens(self, symbol: str, limite: int) -> list: ...
+    def listar_trades(self, symbol: str, limite: int) -> list: ...
     def ordem_mercado(self, symbol: str, lado: str, qty: Decimal, client_order_id: str) -> dict: ...
 
 
@@ -271,6 +273,19 @@ class CorretoraBinance:
             if e.code == -2013:  # "Order does not exist."
                 return None
             raise ErroCorretora(f"{symbol}: {e.message} (código {e.code})") from e
+
+    def listar_ordens(self, symbol: str, limite: int = 1000) -> list:
+        """Histórico de ordens do par (todas, não só as nossas — quem filtra
+        pelo prefixo é a reconciliação)."""
+        return self._cliente.get_all_orders(symbol=symbol, limit=limite)
+
+    def listar_trades(self, symbol: str, limite: int = 1000) -> list:
+        """Execuções reais, com `commission` e `commissionAsset`.
+
+        É a única fonte que diz quanto REALMENTE entrou na carteira: a taxa da
+        compra é cobrada no ativo comprado, então o `executedQty` da ordem é
+        maior do que o recebido. Ver cabeçalho de `reconciliacao.py`."""
+        return self._cliente.get_my_trades(symbol=symbol, limit=limite)
 
     def ordem_mercado(self, symbol: str, lado: str, qty: Decimal, client_order_id: str) -> dict:
         from binance.exceptions import BinanceAPIException

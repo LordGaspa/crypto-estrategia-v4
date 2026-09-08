@@ -173,14 +173,33 @@ desfeita. Arquivos: `executor_ordens.py`, `tests/test_executor_ordens.py` (37 te
 
 ### Fase 2 — Reconciliação (eu, ~1 dia)
 
-A regra que evita a categoria mais perigosa de bug: **o bot nunca confia na própria memória.**
+**Status: APROVADA na testnet em 2026-09-08.** Arquivos: `reconciliacao.py`,
+`tests/test_reconciliacao.py` (19 testes) e `testnet_reconciliacao.py`.
 
-Antes de agir, ele pergunta à Binance o que realmente tem em carteira e compara com o que acha que
-tem. Divergiu? Não opera, e manda e-mail. Um arquivo de estado corrompido, uma ordem parcialmente
-preenchida ou uma venda que você fez manualmente pelo celular não podem virar uma decisão errada.
+A regra que evita a categoria mais perigosa de bug: **o bot nunca confia na própria memória.** Ele
+reconstrói a posição a partir do histórico da própria corretora — contando só as ordens cujo
+`clientOrderId` começa com `omega-` — e compara com o saldo real.
 
-**Aprovação:** eu provoco divergências de propósito (edito o arquivo de estado, vendo na mão) e o
-bot detecta e trava em todos os casos.
+Três coisas que a implementação obrigou a acertar:
+
+**1. O saldo da conta NÃO é a posição do bot.** Se você tiver BTC comprado por conta própria, ele
+aparece no mesmo saldo, e um `vender_tudo` ingênuo venderia as suas moedas junto. Prova na testnet:
+a conta tinha 1 BTC pré-existente, o bot operou por cima e fechou a posição — o 1 BTC saiu
+**1.00000000, intacto**.
+
+**2. A comissão sai do ativo comprado.** Uma compra de `executedQty = 0.00255000` BTC cobra
+`0.00000255` BTC de taxa: entram **0.00254745**. Contar pela ordem superestimaria a posição — o bot
+tentaria vender o que não tem, e toda reconciliação acusaria divergência falsa. Por isso a contagem
+sai dos **trades**, que trazem `commission`, não das ordens.
+
+**3. Sobra poeira em todo ciclo** — descoberto por um teste que falhou. A compra entrega menos que o
+pedido (taxa) e a venda arredonda para baixo no passo do lote, então sempre resta um pouco
+(0.00000470 BTC na última rodada). Se esse resto contasse como posição aberta, **o bot travaria
+naquele ativo para sempre** e nunca voltaria a comprar. Agora um resto invendável é classificado
+como poeira, reportado, e não bloqueia nada.
+
+Divergência real (venda manual, transferência, saque) → o bot **para naquele ativo e avisa**; não
+decide nada sozinho.
 
 ### Fase 3 — Guardrails (eu, ~1 dia)
 
