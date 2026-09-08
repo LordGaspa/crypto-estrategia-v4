@@ -21,9 +21,17 @@ O que ele resolve, e por quê:
 
 3. **Idempotência.** O `clientOrderId` é derivado de (símbolo, candle, lado).
    Se o cron rodar duas vezes no mesmo candle — reinício, sobreposição de
-   execução, retry manual — a segunda tentativa chega com o MESMO id e é
-   recusada **pela própria Binance**, não por lógica nossa. É a única defesa que
-   continua valendo mesmo se o nosso arquivo de estado for perdido ou corrompido.
+   execução, retry manual — a segunda tentativa carrega o MESMO id, e antes de
+   enviar qualquer coisa o executor **pergunta à corretora se aquele id já
+   existe**. É uma defesa que continua valendo mesmo se o nosso arquivo de
+   estado for perdido ou corrompido, porque a memória fica na Binance.
+
+   > **Descoberto na testnet (2026-09-08).** A primeira versão confiava na
+   > Binance recusar o id repetido. **Ela não recusa**: a unicidade do
+   > `clientOrderId` só vale enquanto a ordem está ABERTA, e ordem a mercado
+   > preenche na hora, liberando o id imediatamente. O teste de fumaça comprou
+   > duas vezes. Por isso a checagem prévia — sem ela não havia proteção
+   > nenhuma contra compra em dobro.
 
 Credenciais: **só** por variável de ambiente (`BINANCE_API_KEY`,
 `BINANCE_API_SECRET`), como já é feito com o SMTP. Nunca em arquivo versionado,
@@ -207,6 +215,7 @@ class Corretora(Protocol):
     def info_symbol(self, symbol: str) -> dict: ...
     def preco(self, symbol: str) -> Decimal: ...
     def saldo(self, ativo: str) -> Decimal: ...
+    def buscar_ordem(self, symbol: str, client_order_id: str) -> Optional[dict]: ...
     def ordem_mercado(self, symbol: str, lado: str, qty: Decimal, client_order_id: str) -> dict: ...
 
 
@@ -247,6 +256,21 @@ class CorretoraBinance:
 
     def saldo(self, ativo: str) -> Decimal:
         return Decimal(self._cliente.get_asset_balance(asset=ativo)["free"])
+
+    def buscar_ordem(self, symbol: str, client_order_id: str) -> Optional[dict]:
+        """A ordem com esse clientOrderId já existe? `None` = não existe.
+
+        É esta consulta — não a recusa da Binance — que garante a idempotência,
+        pelo motivo explicado no cabeçalho do módulo. Vale para ordem já
+        preenchida, cancelada ou ainda aberta."""
+        from binance.exceptions import BinanceAPIException
+
+        try:
+            return self._cliente.get_order(symbol=symbol, origClientOrderId=client_order_id)
+        except BinanceAPIException as e:
+            if e.code == -2013:  # "Order does not exist."
+                return None
+            raise ErroCorretora(f"{symbol}: {e.message} (código {e.code})") from e
 
     def ordem_mercado(self, symbol: str, lado: str, qty: Decimal, client_order_id: str) -> dict:
         from binance.exceptions import BinanceAPIException
@@ -318,6 +342,19 @@ def enviar_ordem(corretora: Corretora, symbol: str, lado: str, qty: Decimal,
 
     if qty <= 0:
         return ResultadoOrdem("recusada", symbol, lado, coid, motivo="quantidade zero")
+
+    # Idempotência: essa ordem já foi enviada neste candle? Perguntamos à
+    # corretora, não à nossa memória. Falha nesta consulta ABORTA o envio ("fail
+    # closed"): sem conseguir verificar, o risco de comprar em dobro é pior do
+    # que o de perder uma entrada.
+    try:
+        if corretora.buscar_ordem(symbol, coid) is not None:
+            return ResultadoOrdem("duplicada", symbol, lado, coid,
+                                  motivo="ordem com este id já existe na corretora")
+    except Exception as e:
+        return ResultadoOrdem("erro", symbol, lado, coid,
+                              motivo=f"não deu pra verificar duplicidade, ordem NÃO enviada "
+                                     f"({type(e).__name__}: {e})")
 
     try:
         resposta = corretora.ordem_mercado(symbol, lado, qty, coid)

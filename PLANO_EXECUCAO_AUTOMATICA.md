@@ -78,6 +78,10 @@ Assumimos 0,1% de taxa + 0,05% (líquidas) / 0,175% (menos líquidas) de slippag
 comparar contra os **fills reais**. Se o slippage real for maior, o `slippage_realista_v4.py` já
 existe para reavaliar a estratégia inteira com o número correto.
 
+O `testnet_smoke.py` já mede e imprime esse desvio (deu −0,018% em US$ 200 de BTC). **Esse número
+não vale como evidência**: o livro de ofertas da testnet é sintético e raso. Serve só para provar
+que a medição funciona; o dado que conta vem da Fase 4, com o mercado real.
+
 ### 3.4 Mínimos da Binance — medido, e menos grave do que eu previa
 
 A Binance tem filtros por par: `NOTIONAL` (valor mínimo por ordem) e `LOT_SIZE` (a quantidade
@@ -140,10 +144,23 @@ Cada fase tem um critério de aprovação. Nenhuma fase começa sem a anterior a
 
 ### Fase 1 — Camada de ordens, contra a *testnet* (eu, ~1 dia)
 
-**Status: código escrito e testado (2026-09-08).** Falta apenas rodar contra a testnet de verdade,
-o que exige uma chave gratuita de `testnet.binance.vision` (não tem relação com a conta real).
+**Status: APROVADA na testnet em 2026-09-08.** Compra enviada, ordem repetida bloqueada, posição
+desfeita. Arquivos: `executor_ordens.py`, `tests/test_executor_ordens.py` (37 testes, sem rede) e
+`testnet_smoke.py` (o teste contra a testnet real).
 
-Arquivo novo: `executor_ordens.py` + `tests/test_executor_ordens.py` (35 testes, sem rede).
+> **O que a testnet pegou, e que os testes não pegariam.** A primeira versão confiava na Binance
+> recusar um `clientOrderId` repetido. **Ela não recusa.** A unicidade do id só vale enquanto a
+> ordem está ABERTA — e ordem a mercado preenche instantaneamente, liberando o id. Na primeira
+> execução o teste **comprou duas vezes**. Não havia proteção nenhuma contra o cron rodando em
+> duplicidade.
+>
+> Correção: antes de enviar, o executor **consulta a corretora** ("essa ordem já existe?"). Se a
+> consulta falhar, a ordem **não é enviada** (*fail closed*) — perder uma entrada é melhor que
+> comprar em dobro. O teste `test_a_corretora_sozinha_NAO_protege_contra_id_repetido` trava essa
+> regressão.
+>
+> É a justificativa inteira desta fase: nenhum teste com corretora falsa acharia isso, porque a
+> falsa fazia o que eu *achava* que a Binance fazia. Só o ambiente real desmente a premissa.
 
 - Envolve a API da Binance: consulta saldo, lê os filtros do par (`exchangeInfo`), arredonda a
   quantidade para o `LOT_SIZE`, envia ordem a mercado, confirma o preenchimento

@@ -9,17 +9,16 @@ O que ele prova, na ordem:
   1. conecta e lê o saldo;
   2. lê os filtros reais do par e dimensiona a ordem;
   3. COMPRA;
-  4. repete a MESMA ordem (mesmo candle) — tem que ser recusada como duplicada,
-     que é a prova da idempotência;
-  5. VENDE tudo de volta, deixando a carteira como estava.
+  4. repete a MESMA ordem (mesmo candle) — tem que ser bloqueada, que é a
+     prova da idempotência;
+  5. VENDE de volta exatamente o que comprou.
 
 Uso:
     set -a && . ./testnet.env && set +a
     .venv/Scripts/python.exe testnet_smoke.py
 
-Só toca a testnet: `CorretoraBinance(testnet=True)`. Se as variáveis apontarem
-para a conta real por engano, o `--confirmar-real` inexistente garante que não
-há caminho para isso aqui.
+Só toca a testnet: `CorretoraBinance(testnet=True)` está fixo no código, sem
+nenhuma opção que aponte para a conta real.
 """
 import sys
 from datetime import datetime, timezone
@@ -27,7 +26,7 @@ from decimal import Decimal
 
 from executor_ordens import (
     CorretoraBinance, ErroCorretora, extrair_filtros, calcular_quantidade,
-    comprar, vender_tudo, id_ordem, COMPRA,
+    comprar, vender_tudo, enviar_ordem, id_ordem, COMPRA, VENDA,
 )
 
 PAR = "BTCUSDT"
@@ -78,8 +77,12 @@ def main():
     if not q.aceita:
         return 1
 
-    # candle fixo: é o que faz a repetição do passo 4 colidir de propósito
-    candle = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:00")
+    # "Candle" ficticio, unico por execucao do teste. Precisa ser fixo DENTRO
+    # da rodada (e o que faz o passo 4 colidir de proposito) e diferente ENTRE
+    # rodadas -- senao a protecao de idempotencia barra o teste seguinte, que
+    # foi exatamente o que aconteceu na primeira tentativa. Em producao o valor
+    # real vem do t_abert do candle que gerou o sinal.
+    candle = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
     linha(f"    clientOrderId desta compra: {id_ordem(PAR, candle, COMPRA)}")
 
     # 3. compra ------------------------------------------------------------
@@ -100,11 +103,14 @@ def main():
         linha(f"        {r2.motivo}")
         linha("        Sem isso, o cron rodando duas vezes compraria em dobro.")
         return 1
-    linha("    OK — a Binance recusou a segunda. Idempotencia funcionando.")
+    linha("    OK — bloqueada pela consulta previa. Idempotencia funcionando.")
 
     # 5. desfaz ------------------------------------------------------------
-    r3 = vender_tudo(corretora, PAR, candle + "-desfazer")
-    linha(f"\n[5] VENDA de volta: {r3.status}")
+    # Vende exatamente o que a compra trouxe, e NAO o saldo inteiro: a conta ja
+    # vinha com BTC proprio. (`vender_tudo` liquida o saldo todo -- correto so
+    # quando o bot e o unico dono do ativo. Tratar isso e assunto da Fase 2.)
+    r3 = enviar_ordem(corretora, PAR, VENDA, r1.qty, candle + "-desfazer")
+    linha(f"\n[5] VENDA de volta ({r1.qty} {base}): {r3.status}")
     if r3.ok:
         linha(f"    {r3.qty} {base} a {r3.preco_medio:.2f} = US$ {r3.valor:.2f}")
     else:

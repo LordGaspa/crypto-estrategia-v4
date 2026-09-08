@@ -41,15 +41,25 @@ def info_par(symbol="BTCUSDT", base="BTC", passo="0.00001", min_qty="0.00001",
 
 
 class CorretoraFake:
-    """Imita o que importa da Binance: filtros, preço, saldo e recusa de id
-    duplicado. `falha` força um erro para testar o caminho de exceção."""
+    """Imita o que importa da Binance: filtros, preço, saldo, histórico de
+    ordens por clientOrderId e envio a mercado.
 
-    def __init__(self, info=None, preco="50000", saldos=None, falha=None):
+    IMPORTANTE — comportamento verificado na testnet em 2026-09-08: a Binance
+    **aceita** um clientOrderId repetido depois que a ordem anterior preencheu
+    (a unicidade só vale enquanto a ordem está ABERTA, e ordem a mercado
+    preenche na hora). Esta falsa reproduz isso de propósito: `ordem_mercado`
+    NÃO recusa duplicata. Quem protege é a consulta prévia em `enviar_ordem`.
+    Uma falsa mais "esperta" que a corretora real esconderia justamente o bug
+    que o teste precisa pegar.
+    """
+
+    def __init__(self, info=None, preco="50000", saldos=None, falha=None, falha_busca=None):
         self._info = info or info_par()
         self._preco = Decimal(preco)
         self._saldos = saldos or {"BTC": Decimal("0.5")}
         self._falha = falha
-        self.ids_usados = set()
+        self._falha_busca = falha_busca
+        self.ordens = {}
         self.enviadas = []
 
     def info_symbol(self, symbol):
@@ -61,20 +71,24 @@ class CorretoraFake:
     def saldo(self, ativo):
         return self._saldos.get(ativo, Decimal(0))
 
+    def buscar_ordem(self, symbol, client_order_id):
+        if self._falha_busca:
+            raise self._falha_busca
+        return self.ordens.get(client_order_id)
+
     def ordem_mercado(self, symbol, lado, qty, client_order_id):
         if self._falha:
             raise self._falha
-        if client_order_id in self.ids_usados:
-            # mensagem igual à da Binance real (código -2010)
-            raise ErroCorretora(f"{symbol}: Duplicate order sent. (código -2010)", duplicada=True)
-        self.ids_usados.add(client_order_id)
-        self.enviadas.append((symbol, lado, qty, client_order_id))
-        return {
+        resposta = {
             "symbol": symbol, "status": "FILLED",
+            "clientOrderId": client_order_id,
             "executedQty": str(qty),
             "cummulativeQuoteQty": str(qty * self._preco),
             "fills": [{"qty": str(qty), "price": str(self._preco)}],
         }
+        self.ordens[client_order_id] = resposta      # vira historico consultavel
+        self.enviadas.append((symbol, lado, qty, client_order_id))
+        return resposta
 
 
 # ---------------------------------------------------------------------------
@@ -235,6 +249,26 @@ def test_ordem_repetida_no_mesmo_candle_e_recusada_pela_corretora():
     assert r1.status == "executada"
     assert r2.status == "duplicada"
     assert len(c.enviadas) == 1          # só uma ordem chegou de fato
+
+
+def test_a_corretora_sozinha_NAO_protege_contra_id_repetido():
+    """Regressão do bug achado na testnet: mandar a ordem direto, sem a consulta
+    prévia, passa duas vezes. Este teste existe para travar a tentação de
+    "simplificar" removendo a verificação — ela é a única proteção real."""
+    c = CorretoraFake()
+    c.ordem_mercado("BTCUSDT", COMPRA, Decimal("0.002"), "mesmo-id")
+    c.ordem_mercado("BTCUSDT", COMPRA, Decimal("0.002"), "mesmo-id")
+    assert len(c.enviadas) == 2      # a Binance real se comporta assim
+
+
+def test_falha_ao_verificar_duplicidade_aborta_o_envio():
+    """Fail closed: sem conseguir confirmar que a ordem ainda não existe, é
+    melhor perder a entrada do que arriscar comprar em dobro."""
+    c = CorretoraFake(falha_busca=ConnectionError("API instável"))
+    r = enviar_ordem(c, "BTCUSDT", COMPRA, Decimal("0.002"), "c1")
+    assert r.status == "erro"
+    assert "NÃO enviada" in r.motivo
+    assert not c.enviadas
 
 
 def test_candle_seguinte_pode_operar_normalmente():
