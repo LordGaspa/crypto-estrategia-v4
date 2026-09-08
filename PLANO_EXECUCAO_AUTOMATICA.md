@@ -203,7 +203,13 @@ decide nada sozinho.
 
 ### Fase 3 — Guardrails (eu, ~1 dia)
 
-Arquivo novo: `guardrails.py`. Cada um responde a uma falha real e conhecida:
+**Status: CONCLUÍDA em 2026-09-08.** `guardrails.py` + `tests/test_guardrails.py` (44 testes).
+
+O módulo **não faz chamada de rede**: recebe números prontos e devolve um veredito. É deliberado —
+guardrail que depende de I/O falha junto com aquilo que deveria proteger, e do jeito que está dá
+para testar todos os caminhos sem tocar a corretora. Regra geral: **na dúvida, não opera.**
+
+Cada um responde a uma falha real e conhecida:
 
 | Guardrail | Contra o quê |
 |---|---|
@@ -215,7 +221,19 @@ Arquivo novo: `guardrails.py`. Cada um responde a uma falha real e conhecida:
 | **Kill switch**: arquivo `PARAR` na pasta → não opera | você desligar tudo em 5 segundos, do celular |
 | Teto de exposição agregada em 100% | garantir que continua Spot, sem margem acidental |
 
-**Aprovação:** teste automatizado para cada um, com corretora falsa (nenhum toca a rede).
+**Como usar o kill switch** (o único que é operado por você):
+
+```bash
+touch PARAR    # o bot para de operar na próxima rodada
+rm PARAR       # volta a operar
+```
+
+Um arquivo, e não uma variável de ambiente ou uma flag no código, justamente porque precisa
+funcionar no susto: por SSH, do celular, sem reiniciar nada e sem esperar deploy.
+
+**Aprovação:** teste automatizado para cada trava, nos dois sentidos — o caso que ela libera e o
+caso que ela bloqueia. Trava que só bloqueia deixaria o bot parado para sempre; trava que só libera
+é decoração.
 
 ### Fase 4 — Sombra: roda em paralelo, sem dinheiro (nós, 4 a 8 semanas)
 

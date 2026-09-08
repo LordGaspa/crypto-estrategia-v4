@@ -66,3 +66,8 @@ monitor.env
 # chaves da Binance Spot Testnet (dinheiro de brinquedo, mas mesma disciplina:
 # credencial nao vai pro repo). Ver PLANO_EXECUCAO_AUTOMATICA.md, Fase 1.
 testnet.env
+
+# estado dos guardrails (contador de erros, referencia do dia) e o kill switch
+# -- ambos especificos da maquina que roda o bot
+guardrails_estado.json
+PARAR
