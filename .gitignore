@@ -62,3 +62,7 @@ otimizador_v7_[A-Z0-9]*USDT_*.csv
 # estado do monitor (gerado em execucao, especifico de cada maquina)
 monitor_estado.json
 monitor.env
+
+# chaves da Binance Spot Testnet (dinheiro de brinquedo, mas mesma disciplina:
+# credencial nao vai pro repo). Ver PLANO_EXECUCAO_AUTOMATICA.md, Fase 1.
+testnet.env
