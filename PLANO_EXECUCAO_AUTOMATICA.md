@@ -1,0 +1,246 @@
+# Plano — execução automática de ordens na Binance
+
+**Status:** planejamento. Nenhuma linha de código de execução foi escrita ainda.
+**Objetivo final:** o sistema abre e fecha posições sozinho, seguindo os mesmos sinais que hoje
+chegam por e-mail, sem intervenção manual.
+
+---
+
+## 1. A decisão que muda tudo: Spot antes de margem
+
+O pedido original foi margem. Este plano começa em **Spot** por um motivo que vem dos nossos
+próprios números, não de cautela genérica:
+
+| Fato já medido no projeto | Onde está |
+|---|---|
+| A `RECEITA_ROBUSTA` foi derivada e validada **comprada, sem alavancagem** | `estrategia_ouro_v5.py`, `holdout_v4.py` |
+| O ganho aparente do modo Agressivo **era alavancagem**: passava de 100% do capital em 28,4% do tempo | `riqueza_terminal_v6_exposicao.py` |
+| Com teto Spot, o Agressivo cai de +128,9%/ano para **+89,5%** — quase empatado com o Defensivo (+87,4%) | `riqueza_terminal_v6_spotcap.py` |
+| Custo de juros de margem e risco de liquidação: **não modelados em lugar nenhum** | — |
+
+Traduzindo: neste sistema específico, a alavancagem já foi medida e entrega **pouco**, enquanto
+adiciona um risco que nunca quantificamos. Margem não sai do plano — vai para a Fase 7, depois que
+existir um backtest que modele juros e liquidação. Se o resultado lá for fraco (o que os dados
+acima sugerem), teremos economizado o risco de descobrir isso com dinheiro real.
+
+**Além disso, uma diferença estrutural que a margem introduz:** em Spot, o pior caso é o ativo ir a
+zero — você perde o que colocou. Em margem, o pior caso é liquidação, que pode acontecer numa mecha
+de 15 minutos que o backtest (que só olha fechamento de candle de 4–12h) **nunca teria visto**. Não
+é o mesmo jogo com números maiores; é outro jogo.
+
+---
+
+## 2. O que já está pronto e vai ser reaproveitado
+
+Não começamos do zero. O que existe hoje:
+
+- `estrategia_core.estado_posicao_atual()` — decide ALTA/BAIXA. **Fonte única da verdade.**
+- `monitor_sinais.py` — já roda 24/7 no servidor, já detecta mudança de sinal, já tem:
+  - checagem de dado velho (`MAX_ATRASO_HORAS = 30`) que **exclui** o ativo da comparação;
+  - escrita atômica de estado (`os.replace`) que não corrompe se o processo morrer no meio;
+  - política de "se o aviso falhar, não salva o estado" — na próxima rodada tenta de novo.
+- Servidor fora dos EUA (contorna o bloqueio geográfico da Binance).
+
+O executor entra **como uma camada ao lado** disso, não por cima. O `monitor_sinais.py` continua
+avisando; o executor age. Se o executor quebrar, o e-mail continua chegando e você opera na mão.
+
+**Regra de arquitetura inegociável:** o executor **não recalcula** a estratégia com lógica própria.
+Ele chama `estado_posicao_atual()`, exatamente como o monitor. Qualquer reimplementação paralela
+viraria, com o tempo, uma estratégia diferente da que validamos — e ninguém perceberia.
+
+---
+
+## 3. As cinco discrepâncias entre o backtest e o mundo real
+
+Isto é o coração técnico do projeto. Cada uma precisa de uma decisão explícita e, depois, de
+medição. São elas que fazem um bot "que funcionou no backtest" perder dinheiro na vida real.
+
+### 3.1 O stop-loss não existe do mesmo jeito
+
+O backtest checa `mínima <= stop` **no fechamento do candle**. Duas traduções possíveis:
+
+- **Stop de verdade na corretora** (ordem OCO): protege contra crash de madrugada, mas dispara
+  *intrabar* — vende em pontos que o backtest nunca vendeu. Muda os resultados.
+- **Checagem no fechamento**, replicando o backtest: fiel ao que validamos, mas fica exposto entre
+  candles (até 12h descoberto).
+
+**Decisão proposta:** replicar o backtest (checagem no fechamento) na Fase 1, porque é o único jeito
+de comparar maçã com maçã. Medir a diferença na Fase 4. Só considerar OCO depois, com número na mão.
+
+### 3.2 Preço de entrada
+
+Backtest entra na **abertura do candle seguinte**. O cron roda a cada 30 min, então na prática
+entramos alguns minutos depois. Diferença pequena, mas precisa ser medida — não presumida.
+
+### 3.3 Custo real vs. custo assumido
+
+Assumimos 0,1% de taxa + 0,05% (líquidas) / 0,175% (menos líquidas) de slippage. Na Fase 4 vamos
+comparar contra os **fills reais**. Se o slippage real for maior, o `slippage_realista_v4.py` já
+existe para reavaliar a estratégia inteira com o número correto.
+
+### 3.4 Mínimos da Binance — o problema mais concreto
+
+A Binance tem filtros por par: `MIN_NOTIONAL` (valor mínimo por ordem, tipicamente US$ 5–10) e
+`LOT_SIZE` (a quantidade precisa ser múltipla de um passo).
+
+Com **US$ 500 distribuídos em 22 ativos**, a ordem média fica em ~US$ 23 — e os ativos de peso menor
+podem cair **abaixo do mínimo executável**. O bot tentaria comprar e a ordem seria simplesmente
+rejeitada, sem você perceber, deixando o portfólio real diferente do simulado.
+
+Três saídas, a decidir na Fase 0:
+
+1. Operar **menos ativos** (os 8 veteranos, por exemplo) com posições maiores;
+2. Aumentar o capital inicial;
+3. Aceitar que ativos abaixo do mínimo ficam de fora — mas então **o backtest precisa ser refeito
+   com essa mesma restrição**, senão estamos comparando com um portfólio que não existe.
+
+A opção 3 sem refazer o backtest é a armadilha silenciosa. Recomendo a 1.
+
+### 3.5 O primeiro dia
+
+No dia em que o bot ligar, vários ativos já estarão em ALTA há semanas — sinal antigo, preço já
+subiu. Comprar todos de uma vez é entrar tarde em tudo simultaneamente.
+
+**Decisão proposta:** o bot começa **zerado** e só entra em sinais **novos**, que nascerem depois de
+ele ligar. Mesma filosofia do "primeira execução nunca alerta" que já está no monitor.
+
+---
+
+## 4. Fases
+
+Cada fase tem um critério de aprovação. Nenhuma fase começa sem a anterior aprovada.
+
+### Fase 0 — Decisões e chaves (você, ~30 min)
+
+- [ ] Definir quantos ativos e com quanto de capital (ver 3.4)
+- [ ] Criar chave de API na Binance com **permissão de trade LIGADA e permissão de saque DESLIGADA**
+- [ ] Restringir a chave ao **IP do servidor Oracle** (a Binance permite allowlist de IP)
+- [ ] Definir teto de perda diária que aciona parada automática
+
+> A permissão de saque desligada é a proteção mais importante do projeto inteiro: mesmo que o
+> servidor seja invadido e a chave vazada, ninguém consegue **tirar** dinheiro da conta.
+>
+> **Eu nunca vou pedir, ver ou digitar suas chaves.** Elas vão para o `monitor.env` no servidor
+> (permissão 600, já bloqueado no `.gitignore`), do mesmo jeito que a senha do e-mail.
+
+### Fase 1 — Camada de ordens, contra a *testnet* (eu, ~1 dia)
+
+Arquivo novo: `executor_ordens.py`.
+
+- Envolve a API da Binance: consulta saldo, lê os filtros do par (`exchangeInfo`), arredonda a
+  quantidade para o `LOT_SIZE`, envia ordem a mercado, confirma o preenchimento
+- **Idempotência**: cada ordem carrega um `clientOrderId` derivado de `(ativo, candle, direção)`.
+  Se o cron rodar duas vezes por qualquer motivo, a segunda tentativa é **rejeitada pela própria
+  Binance** como duplicada, em vez de comprar duas vezes
+- Roda inteiro contra a **Binance Spot Testnet** — dinheiro de brinquedo, API idêntica
+
+**Aprovação:** abre e fecha posição na testnet, e ordem duplicada é corretamente recusada.
+
+### Fase 2 — Reconciliação (eu, ~1 dia)
+
+A regra que evita a categoria mais perigosa de bug: **o bot nunca confia na própria memória.**
+
+Antes de agir, ele pergunta à Binance o que realmente tem em carteira e compara com o que acha que
+tem. Divergiu? Não opera, e manda e-mail. Um arquivo de estado corrompido, uma ordem parcialmente
+preenchida ou uma venda que você fez manualmente pelo celular não podem virar uma decisão errada.
+
+**Aprovação:** eu provoco divergências de propósito (edito o arquivo de estado, vendo na mão) e o
+bot detecta e trava em todos os casos.
+
+### Fase 3 — Guardrails (eu, ~1 dia)
+
+Arquivo novo: `guardrails.py`. Cada um responde a uma falha real e conhecida:
+
+| Guardrail | Contra o quê |
+|---|---|
+| Reusar o `MAX_ATRASO_HORAS = 30` do monitor | operar com dado velho de cache |
+| Sanidade de preço (fora de ±X% do último candle → recusa) | dado corrompido / erro de API |
+| Teto de perda diária → para tudo e avisa | espiral de perdas |
+| Teto de valor por ordem | bug de cálculo mandar 100× o pretendido |
+| Disjuntor: N erros seguidos → para e avisa | falha em loop consumindo capital |
+| **Kill switch**: arquivo `PARAR` na pasta → não opera | você desligar tudo em 5 segundos, do celular |
+| Teto de exposição agregada em 100% | garantir que continua Spot, sem margem acidental |
+
+**Aprovação:** teste automatizado para cada um, com corretora falsa (nenhum toca a rede).
+
+### Fase 4 — Sombra: roda em paralelo, sem dinheiro (nós, 4 a 8 semanas)
+
+O bot roda de verdade, recebe sinais de verdade, **registra a ordem que teria enviado — e não
+envia**. Todo dia compara com o que o backtest diria.
+
+É aqui que as cinco discrepâncias da Seção 3 deixam de ser teoria e viram número.
+
+**Aprovação:** as decisões do bot batem com o backtest, e o desvio acumulado é pequeno e explicável.
+Não há atalho nesta fase — é ela que separa "funciona" de "achamos que funciona".
+
+### Fase 5 — Dinheiro real, mínimo (você + eu, 4 semanas)
+
+Um ativo. O menor valor que passe do `MIN_NOTIONAL`. E-mail a cada ordem executada.
+
+O objetivo **não é lucro** — é provar que a execução real bate com a Fase 4. Lucro ou prejuízo neste
+valor é ruído estatístico; o que importa é a fidelidade.
+
+**Aprovação:** 4 semanas sem intervenção manual, fills dentro do slippage assumido.
+
+### Fase 6 — Escala gradual (nós, 2 a 3 meses)
+
+Aumentar em degraus (25% → 50% → 100% do capital planejado), um degrau por mês, e só se o anterior
+correu limpo. Entram aqui os pesos por volatilidade inversa e o rebalanceamento.
+
+### Fase 7 — Avaliar margem (a decidir)
+
+**Só depois de tudo acima.** E começa com backtest, não com código:
+
+1. Refazer a riqueza terminal modelando **juros de margem** (a Binance cobra por hora) e
+   **liquidação** (com dados intrabar de 1h, não 4–12h — o backtest atual não enxerga a mecha que
+   liquida)
+2. Se o resultado líquido não superar o Spot com folga clara, **encerramos aqui** — e teremos a
+   resposta de graça
+3. Só se superar: alavancagem baixa (1,5×–2× no máximo), um ativo, repetindo as Fases 4→6
+
+---
+
+## 5. Cronograma realista
+
+| | Otimista | Realista |
+|---|---|---|
+| Fases 0–3 (código + testes) | 3 dias | 1 semana |
+| Fase 4 (sombra) | 4 semanas | 8 semanas |
+| Fase 5 (real mínimo) | 4 semanas | 4 semanas |
+| Fase 6 (escala) | 2 meses | 3 meses |
+| **Até capital cheio** | **~4 meses** | **~6 meses** |
+| Fase 7 (margem) | — | +1 mês de estudo |
+
+O código é a parte rápida — cerca de uma semana. **O tempo é quase todo de observação**, e é
+justamente ele que não dá pra comprimir sem transformar o projeto numa aposta.
+
+---
+
+## 6. O que continua sendo seu
+
+Automatizar a execução **não** automatiza a decisão de continuar. Você segue responsável por:
+
+- **Ligar e desligar.** O kill switch existe pra ser usado.
+- **Vigiar o regime.** A estratégia é reconhecidamente fraca em bull (bate o buy & hold em só 19%
+  das janelas). Se vier um bull forte, o bot vai ganhar menos que comprar e segurar — e isso é
+  esperado, não é defeito.
+- **Aceitar o drawdown.** O sistema já teve quedas de dois dígitos no histórico. Desligar no fundo
+  transforma uma perda temporária em perda permanente — é o erro mais caro e mais comum.
+- **Revisar de tempos em tempos.** Nenhuma estratégia funciona pra sempre. Se o comportamento
+  descolar do backtest de forma sustentada, é sinal de reavaliar, não de aumentar a aposta.
+
+---
+
+## 7. Regras que este plano herda do projeto
+
+- Não tocar no **Código Ômega** original (regra do `CLAUDE.md`)
+- Não mexer nas funções existentes de `estrategia_core.py` — só adição, como foi feito na v6
+- **Holdout permanece lacrado.** Nada aqui reotimiza contra ele
+- Arquivos novos, versões antigas preservadas
+- Testes seguindo a disciplina de `tests/`: golden-master, sem look-ahead, corretora falsa
+
+---
+
+**Aviso:** este é um sistema pessoal, baseado na `RECEITA_ROBUSTA` derivada do período de
+desenvolvimento. Não é recomendação de investimento. Retorno passado em backtest não garante
+retorno futuro, e execução automática amplifica tanto acertos quanto erros de implementação.
