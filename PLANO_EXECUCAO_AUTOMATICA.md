@@ -78,23 +78,37 @@ Assumimos 0,1% de taxa + 0,05% (líquidas) / 0,175% (menos líquidas) de slippag
 comparar contra os **fills reais**. Se o slippage real for maior, o `slippage_realista_v4.py` já
 existe para reavaliar a estratégia inteira com o número correto.
 
-### 3.4 Mínimos da Binance — o problema mais concreto
+### 3.4 Mínimos da Binance — medido, e menos grave do que eu previa
 
-A Binance tem filtros por par: `MIN_NOTIONAL` (valor mínimo por ordem, tipicamente US$ 5–10) e
-`LOT_SIZE` (a quantidade precisa ser múltipla de um passo).
+A Binance tem filtros por par: `NOTIONAL` (valor mínimo por ordem) e `LOT_SIZE` (a quantidade
+precisa ser múltipla de um passo).
 
-Com **US$ 500 distribuídos em 22 ativos**, a ordem média fica em ~US$ 23 — e os ativos de peso menor
-podem cair **abaixo do mínimo executável**. O bot tentaria comprar e a ordem seria simplesmente
-rejeitada, sem você perceber, deixando o portfólio real diferente do simulado.
+> **Correção.** A primeira versão deste plano afirmava que US$ 500 em 22 ativos geraria ordens
+> abaixo do mínimo, e recomendava cortar para 8 ativos. **Isso estava errado.** Consultei os
+> filtros reais da Binance (2026-09-08) e o mínimo é de **US$ 1 a US$ 5** por par, não os US$ 5–10
+> que eu supus. A recomendação de cortar ativos fica **retirada**.
 
-Três saídas, a decidir na Fase 0:
+Números medidos, aplicando os pesos por volatilidade inversa reais (`portfolio_v4_pesos.csv`):
 
-1. Operar **menos ativos** (os 8 veteranos, por exemplo) com posições maiores;
-2. Aumentar o capital inicial;
-3. Aceitar que ativos abaixo do mínimo ficam de fora — mas então **o backtest precisa ser refeito
-   com essa mesma restrição**, senão estamos comparando com um portfólio que não existe.
+| Capital | Ativos recusados (de 22) |
+|---|---|
+| US$ 50 | 17 |
+| US$ 100 | 8 |
+| US$ 150 | 3 |
+| US$ 175 | 1 (HBAR) |
+| **US$ 200** | **0 — todos passam** |
+| US$ 500 | 0 |
 
-A opção 3 sem refazer o backtest é a armadilha silenciosa. Recomendo a 1.
+O ativo mais exigente é o **HBAR**: com peso de 2,60%, ele sozinho exige um capital total de
+**US$ 192** para que sua fatia alcance o mínimo de US$ 5 da Binance.
+
+**Conclusão:** o piso do portfólio completo é de **~US$ 200**. Com os US$ 500 planejados há folga
+de 2,5×, e os 22 ativos ficam mantidos. Nenhuma mudança de escopo é necessária.
+
+O que **continua** valendo desta seção: a recusa nunca pode ser silenciosa. Se um dia o capital cair
+(por prejuízo) abaixo do piso de algum ativo, o bot tem que **avisar**, não simplesmente deixar de
+comprar. Isso está implementado e testado em `calcular_quantidade()`, que devolve motivo legível em
+vez de uma quantidade zero muda.
 
 ### 3.5 O primeiro dia
 
@@ -112,7 +126,8 @@ Cada fase tem um critério de aprovação. Nenhuma fase começa sem a anterior a
 
 ### Fase 0 — Decisões e chaves (você, ~30 min)
 
-- [ ] Definir quantos ativos e com quanto de capital (ver 3.4)
+- [ ] Confirmar capital inicial — **mínimo medido: US$ 200** para os 22 ativos (ver 3.4);
+      com US$ 500 há folga de 2,5×
 - [ ] Criar chave de API na Binance com **permissão de trade LIGADA e permissão de saque DESLIGADA**
 - [ ] Restringir a chave ao **IP do servidor Oracle** (a Binance permite allowlist de IP)
 - [ ] Definir teto de perda diária que aciona parada automática
@@ -125,7 +140,10 @@ Cada fase tem um critério de aprovação. Nenhuma fase começa sem a anterior a
 
 ### Fase 1 — Camada de ordens, contra a *testnet* (eu, ~1 dia)
 
-Arquivo novo: `executor_ordens.py`.
+**Status: código escrito e testado (2026-09-08).** Falta apenas rodar contra a testnet de verdade,
+o que exige uma chave gratuita de `testnet.binance.vision` (não tem relação com a conta real).
+
+Arquivo novo: `executor_ordens.py` + `tests/test_executor_ordens.py` (35 testes, sem rede).
 
 - Envolve a API da Binance: consulta saldo, lê os filtros do par (`exchangeInfo`), arredonda a
   quantidade para o `LOT_SIZE`, envia ordem a mercado, confirma o preenchimento
