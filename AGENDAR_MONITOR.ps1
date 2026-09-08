@@ -59,17 +59,21 @@ if (-not (Test-Path $script)) {
 # --- teste antes de agendar --------------------------------------------------
 # Agendar algo que nao funciona so adia a descoberta do problema.
 Write-Output ""
-Write-Output "[1/2] Testando uma execucao antes de agendar..."
-& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script | Out-Null
+# --teste FORCA o envio de um e-mail. Sem ele, este passo rodaria o monitor
+# normalmente -- que so envia quando um sinal muda. Num dia sem mudanca daria
+# "ok" sem nunca ter validado a senha, e o erro de credencial so apareceria
+# semanas depois, justamente quando o alerta que importa nao chegasse.
+Write-Output "[1/2] Testando o envio de e-mail antes de agendar..."
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $script -ArgsMonitor "--teste" | Out-Null
 if ($LASTEXITCODE -ne 0) {
-    Write-Output "      [X] A execucao de teste FALHOU. Veja o motivo em monitor.log:"
+    Write-Output "      [X] O e-mail de teste FALHOU. Veja o motivo em monitor.log:"
     Write-Output ""
     Get-Content (Join-Path $pasta "monitor.log") -Tail 5 | ForEach-Object { Write-Output "          $_" }
     Write-Output ""
     Write-Output "      Corrija antes de agendar."
     exit 1
 }
-Write-Output "      ok"
+Write-Output "      ok -- deve ter chegado um e-mail de teste"
 
 # --- agendamento -------------------------------------------------------------
 Write-Output ""

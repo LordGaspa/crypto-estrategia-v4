@@ -9,6 +9,8 @@
 #      powershell -ExecutionPolicy Bypass -File monitor_agendado.ps1
 # =============================================================================
 
+param([string[]]$ArgsMonitor = @())
+
 $ErrorActionPreference = "Stop"
 $pasta = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $pasta
@@ -54,7 +56,7 @@ if (-not (Test-Path $python)) {
 
 # stderr e capturado junto: se algo quebrar, o motivo fica no log em vez de
 # sumir numa janela que ninguem ve (a tarefa roda escondida).
-$saida = & $python "monitor_sinais.py" 2>&1
+$saida = & $python "monitor_sinais.py" @ArgsMonitor 2>&1
 $codigo = $LASTEXITCODE
 
 foreach ($linha in $saida) { Registrar $linha }
