@@ -159,7 +159,7 @@ def grupo_ouro(symbol: str) -> str:
 # ----------------------------------------------------------------------------
 # DADOS
 # ----------------------------------------------------------------------------
-def carregar_dados(symbol: str, interval_str: str) -> pd.DataFrame:
+def carregar_dados(symbol: str, interval_str: str, max_idade_horas: float = None) -> pd.DataFrame:
     """Baixa (ou lê do cache) OHLC + timestamp pro símbolo/interval dados.
 
     Alguns provedores de nuvem (ex.: Streamlit Community Cloud, hospedado nos
@@ -179,12 +179,62 @@ def carregar_dados(symbol: str, interval_str: str) -> pd.DataFrame:
             pass
         return None
 
+    # `max_idade_horas` (opcional) liga o modo AO VIVO, usado pelo radar e pelo
+    # monitor de e-mail. Sem ele, vale o CACHE_VALIDADE_HORAS de sempre (24h) --
+    # os scripts de pesquisa/backtest continuam exatamente como eram.
+    #
+    # Por que existe: com 24h de validade, o radar mostrava o preco de ONTEM e o
+    # monitor comparava sinais com dado de ontem (alerta ate ~24h atrasado).
+    validade = CACHE_VALIDADE_HORAS if max_idade_horas is None else max_idade_horas
+
+    def _atualizar_incremental(df_cache):
+        """Busca SO os candles novos desde o ultimo do cache e mescla.
+
+        Baixar 5 anos de novo a cada abertura leva minutos; isto e 1 requisicao
+        pequena por ativo. O ultimo candle do cache estava incompleto quando foi
+        salvo, entao a busca comeca NELE e ele e substituido pela versao atual --
+        o ultimo candle devolvido e o que esta aberto agora, ou seja, o preco do
+        momento. Devolve None se falhar (o chamador cai no download completo)."""
+        try:
+            ultimo = pd.Timestamp(df_cache["t_abert"].iloc[-1])
+            inicio_ms = int(ultimo.value // 10**6)
+            client = Client(ping=False)
+            klines = client.get_historical_klines(symbol, TIMEFRAME_MAP[interval_str], inicio_ms)
+            if not klines:
+                return None
+            cols = ["t_abert", "abertura", "maxima", "minima", "fechamento"]
+            novo = pd.DataFrame([k[:5] for k in klines], columns=cols)
+            for col in cols[1:]:
+                novo[col] = pd.to_numeric(novo[col])
+            novo["t_abert"] = pd.to_datetime(novo["t_abert"], unit="ms")
+            base = df_cache.loc[df_cache["t_abert"] < novo["t_abert"].iloc[0], cols]
+            df = pd.concat([base, novo], ignore_index=True)
+            # mesma janela do download completo: sem isso o cache cresceria alem
+            # de ANOS_DE_DADOS_BACKTEST e mudaria, em silencio, o historico que
+            # os backtests leem do mesmo arquivo.
+            corte = pd.Timestamp((datetime.now() - timedelta(days=ANOS_DE_DADOS_BACKTEST * 365)).date())
+            df = df[df["t_abert"] >= corte].reset_index(drop=True)
+            try:
+                df.to_parquet(cache_path)
+            except Exception as e:
+                print(f"[AVISO] cache não salvo: {e}")
+            return df
+        except Exception as e:
+            print(f"[AVISO] {symbol} {interval_str}: atualização incremental falhou ({e}) — tentando download completo")
+            return None
+
     if os.path.exists(cache_path):
         idade_horas = (datetime.now().timestamp() - os.path.getmtime(cache_path)) / 3600
-        if idade_horas < CACHE_VALIDADE_HORAS:
+        if idade_horas < validade:
             df_cache = _ler_cache()
             if df_cache is not None:
                 return df_cache
+        if max_idade_horas is not None:
+            df_cache = _ler_cache()
+            if df_cache is not None and len(df_cache):
+                df_novo = _atualizar_incremental(df_cache)
+                if df_novo is not None:
+                    return df_novo
 
     try:
         client = Client(ping=False)

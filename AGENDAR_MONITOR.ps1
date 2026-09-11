@@ -10,7 +10,7 @@
 # =============================================================================
 
 param(
-    [int]$IntervaloMinutos = 30,
+    [int]$IntervaloMinutos = 60,
     [switch]$Remover
 )
 
@@ -83,8 +83,15 @@ $acao = New-ScheduledTaskAction -Execute "powershell.exe" `
     -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$script`"" `
     -WorkingDirectory $pasta
 
-# -Once + RepetitionInterval com duracao maxima = repete indefinidamente.
-$gatilho = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
+# Primeira execucao no proximo "hh:05". Os candles (4h/6h/8h/12h) fecham
+# sempre em hora cheia -- rodar 5 min depois pega cada fechamento logo apos a
+# Binance consolidar o candle, em vez de num minuto aleatorio da hora.
+$agora = Get-Date
+$inicio = $agora.Date.AddHours($agora.Hour).AddMinutes(5)
+if ($inicio -le $agora) { $inicio = $inicio.AddHours(1) }
+
+# -Once + RepetitionInterval = repete indefinidamente a partir de $inicio.
+$gatilho = New-ScheduledTaskTrigger -Once -At $inicio `
     -RepetitionInterval (New-TimeSpan -Minutes $IntervaloMinutos)
 
 # StartWhenAvailable e o ajuste que mais importa aqui: se o PC estiver

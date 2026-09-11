@@ -71,7 +71,7 @@ def main():
     linhas = []
     for ativo, interval in ATIVOS_PORTFOLIO_V4.items():
         params = RECEITA_ROBUSTA[grupo_ouro(ativo)]
-        df = carregar_dados(ativo, interval)
+        df = carregar_dados(ativo, interval, max_idade_horas=0)
         if df.empty:
             continue
         est = estado_posicao_atual(montar_df_fast(df, params), params, slippage=0.0)

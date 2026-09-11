@@ -91,7 +91,7 @@ def coletar_sinais():
 
     for ativo, interval in ATIVOS_PORTFOLIO_V4.items():
         try:
-            df = carregar_dados(ativo, interval)
+            df = carregar_dados(ativo, interval, max_idade_horas=0)
             if df is None or df.empty:
                 falhas.append((ativo, "sem dados"))
                 continue
