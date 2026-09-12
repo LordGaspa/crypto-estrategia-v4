@@ -1,6 +1,8 @@
 # Plano — execução automática de ordens na Binance
 
-**Status:** planejamento. Nenhuma linha de código de execução foi escrita ainda.
+**Status (2026-09-12):** Fases 1, 2 e 3 concluídas e aprovadas na testnet. **Fase 4 (sombra) no ar,
+coletando** — o bot decide de verdade e registra o que faria, sem enviar ordem nem usar chave de API.
+Nada toca dinheiro real até a Fase 5, que depende do resultado desta coleta.
 **Objetivo final:** o sistema abre e fecha posições sozinho, seguindo os mesmos sinais que hoje
 chegam por e-mail, sem intervenção manual.
 
