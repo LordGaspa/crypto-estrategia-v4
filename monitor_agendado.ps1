@@ -62,4 +62,14 @@ $codigo = $LASTEXITCODE
 foreach ($linha in $saida) { Registrar $linha }
 if ($codigo -ne 0) { Registrar "monitor_sinais.py terminou com codigo $codigo" }
 
+# --- modo sombra (Fase 4) ----------------------------------------------------
+# Roda DEPOIS do monitor e so na execucao normal (nao no --teste). A ordem
+# importa: o e-mail e o que voce depende hoje; se a sombra quebrar, o alerta ja
+# saiu. E ela nao envia ordem nenhuma -- so registra o que teria feito.
+if ($ArgsMonitor.Count -eq 0) {
+    $saidaSombra = & $python "sombra.py" 2>&1
+    foreach ($linha in $saidaSombra) { Registrar $linha }
+    if ($LASTEXITCODE -ne 0) { Registrar "sombra.py terminou com codigo $LASTEXITCODE" }
+}
+
 exit $codigo

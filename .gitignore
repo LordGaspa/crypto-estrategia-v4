@@ -71,3 +71,8 @@ testnet.env
 # -- ambos especificos da maquina que roda o bot
 guardrails_estado.json
 PARAR
+
+# estado e registro do modo sombra (Fase 4) - gerados em execucao, especificos
+# da maquina. O relatorio consolidado e que vai pro repo.
+sombra_estado.json
+sombra_registro.csv

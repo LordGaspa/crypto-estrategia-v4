@@ -237,8 +237,24 @@ caso que ela bloqueia. Trava que só bloqueia deixaria o bot parado para sempre;
 
 ### Fase 4 — Sombra: roda em paralelo, sem dinheiro (nós, 4 a 8 semanas)
 
+**Status: NO AR desde 2026-09-12.** `sombra.py` + `tests/test_sombra.py` (14 testes), acoplado à
+rodada horária do monitor. Coleta em andamento.
+
 O bot roda de verdade, recebe sinais de verdade, **registra a ordem que teria enviado — e não
 envia**. Todo dia compara com o que o backtest diria.
+
+Não usa chave de API: só endpoints públicos (preço e filtros dos pares). É impossível esse arquivo
+mover dinheiro.
+
+Cada decisão grava lado a lado o preço que o **backtest assume** (abertura do candle do sinal), o
+preço **real no instante da decisão** e o atraso entre os dois. Essa coluna de desvio, acumulada por
+semanas, é a resposta para a discrepância 3.2. Junto vão o stop vigente (3.1), o tamanho que caberia
+nos filtros reais da Binance (3.4) e o veredito dos guardrails.
+
+Uma trava foi deliberadamente desligada aqui: a de "preço absurdo". Ela existe para cruzar duas
+fontes independentes (ticker × candle) e pegar dado corrompido; na sombra só há uma fonte, e usar o
+preço do candle do sinal como referência bloquearia, como se fosse erro de API, todo sinal de um
+ativo que andou mais de 10% desde o cruzamento — rotina em memecoin. Ela volta no executor real.
 
 É aqui que as cinco discrepâncias da Seção 3 deixam de ser teoria e viram número.
 
