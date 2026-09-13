@@ -76,3 +76,7 @@ PARAR
 # da maquina. O relatorio consolidado e que vai pro repo.
 sombra_estado.json
 sombra_registro.csv
+
+# escritorio omega -- gerado toda hora, especifico da maquina (o template e
+# o gerador vao pro repo, o resultado nao)
+escritorio_omega.html

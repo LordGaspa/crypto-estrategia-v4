@@ -72,4 +72,14 @@ if ($ArgsMonitor.Count -eq 0) {
     if ($LASTEXITCODE -ne 0) { Registrar "sombra.py terminou com codigo $LASTEXITCODE" }
 }
 
+# --- escritorio omega (visual) ------------------------------------------------
+# Regenera escritorio_omega.html com os dados desta rodada -- so na execucao
+# normal, depois do monitor e da sombra ja terem escrito monitor_estado.json.
+# Se isto falhar, nao afeta o e-mail nem a sombra: eles ja rodaram.
+if ($ArgsMonitor.Count -eq 0) {
+    $saidaEscritorio = & $python "escritorio_gerar.py" 2>&1
+    foreach ($linha in $saidaEscritorio) { Registrar $linha }
+    if ($LASTEXITCODE -ne 0) { Registrar "escritorio_gerar.py terminou com codigo $LASTEXITCODE" }
+}
+
 exit $codigo

@@ -1,0 +1,632 @@
+<!-- DADOS_OMEGA -->
+<title>Escritório Ômega</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@600;700;800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+  :root{
+    --console:#12161d; --console-raised:#1a2029; --console-line:#2a323e;
+    --brass:#d99a4e; --go:#7cae6f; --stop:#c96257; --fora:#6b7480; --ia:#a08fe0;
+    --ink:#ece7db; --ink-dim:#9aa3af;
+    font-variant-numeric: tabular-nums;
+  }
+  *{ box-sizing:border-box; }
+  body{
+    margin:0; background:var(--console); color:var(--ink);
+    font-family:'IBM Plex Sans',system-ui,sans-serif; -webkit-font-smoothing:antialiased;
+  }
+  .console{ max-width:960px; margin:0 auto; padding:26px 22px 56px; }
+
+  .masthead{ padding-bottom:18px; border-bottom:2px solid var(--console-line); margin-bottom:20px; }
+  .masthead-id{
+    font-family:'IBM Plex Mono',monospace; font-size:11px; letter-spacing:0.14em;
+    color:var(--brass); text-transform:uppercase; margin-bottom:6px;
+  }
+  h1{
+    font-family:'Big Shoulders Display',sans-serif; font-weight:800;
+    font-size:clamp(30px,5vw,46px); line-height:0.92; letter-spacing:0.01em;
+    text-transform:uppercase; margin:0; text-wrap:balance;
+  }
+  h1 span{ color:var(--brass); }
+  .masthead p{ margin:8px 0 0; font-size:13.5px; color:var(--ink-dim); max-width:66ch; line-height:1.55; }
+
+  .cena-wrap{ position:relative; border:1px solid var(--console-line); border-radius:6px;
+    overflow:hidden; margin-bottom:14px; background:#1b212a; }
+  .cena-wrap canvas{ display:block; width:100%; height:auto; cursor:default; }
+
+  .bolha{
+    position:absolute; max-width:230px; transform:translate(-50%,-100%);
+    background:var(--console-raised); border:1px solid var(--console-line);
+    border-radius:8px; padding:8px 11px; font-size:12px; line-height:1.4;
+    color:var(--ink-dim); pointer-events:none; opacity:0; transition:opacity 0.25s; z-index:6;
+  }
+  .bolha.mostrar{ opacity:1; }
+  .bolha::after{
+    content:""; position:absolute; left:50%; bottom:-6px; transform:translateX(-50%);
+    border:6px solid transparent; border-top-color:var(--console-line);
+  }
+  .bolha .bolha-nome{
+    font-family:'Big Shoulders Display',sans-serif; font-weight:700; font-size:11px;
+    text-transform:uppercase; color:var(--ink); display:block; margin-bottom:2px;
+  }
+  .bolha b{ color:var(--ink); }
+  .bolha .cursor{ color:var(--ia); }
+
+  .tag-cripto{
+    position:absolute; transform:translate(-50%,-100%);
+    font-family:'IBM Plex Mono',monospace; font-size:9.5px; font-weight:600;
+    padding:2px 6px; border-radius:9px; white-space:nowrap; pointer-events:none; z-index:4;
+    display:flex; flex-direction:column; align-items:center; gap:1px; text-align:center;
+  }
+  .tag-cripto .var{ line-height:1.1; }
+  .tag-cripto .nome{
+    font-size:7.5px; letter-spacing:0.03em; opacity:0.85; line-height:1.1;
+  }
+
+  .controle{ display:flex; align-items:center; gap:14px; margin-bottom:20px; flex-wrap:wrap; }
+  button.ligar{
+    font-family:'Big Shoulders Display',sans-serif; font-weight:700; font-size:16px;
+    letter-spacing:0.04em; text-transform:uppercase; background:var(--brass); color:#241a0d;
+    border:none; border-radius:4px; padding:13px 26px; cursor:pointer;
+    transition:transform 0.1s, opacity 0.2s;
+  }
+  button.ligar:hover{ transform:translateY(-1px); }
+  button.ligar:disabled{ opacity:0.5; cursor:default; transform:none; }
+  .controle-nota{ font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--ink-dim);
+    line-height:1.5; max-width:42ch; }
+
+  .registro{
+    border:1px solid var(--console-line); border-radius:4px; background:var(--console-raised);
+    margin-bottom:22px; overflow:hidden;
+  }
+  .registro-cabeca{
+    display:flex; justify-content:space-between; align-items:baseline; flex-wrap:wrap; gap:6px;
+    padding:11px 16px; border-bottom:1px solid var(--console-line);
+    font-family:'Big Shoulders Display',sans-serif; font-weight:700; font-size:14px;
+    text-transform:uppercase; letter-spacing:0.02em;
+  }
+  .registro-nota{
+    font-family:'IBM Plex Mono',monospace; font-size:10px; letter-spacing:0.02em;
+    text-transform:none; color:var(--ink-dim); font-weight:400;
+  }
+  .registro-corpo{ max-height:220px; overflow-y:auto; }
+  .registro-vazio{ padding:24px 16px; text-align:center; color:var(--ink-dim);
+    font-family:'IBM Plex Mono',monospace; font-size:12px; }
+  .registro-linha{ padding:11px 16px; border-bottom:1px solid rgba(255,255,255,0.035);
+    cursor:pointer; transition:background 0.15s; }
+  .registro-linha:hover{ background:rgba(255,255,255,0.03); }
+  .registro-linha:last-child{ border-bottom:none; }
+  .registro-topo{ display:flex; align-items:center; gap:8px; margin-bottom:3px; }
+  .registro-dot{ width:8px; height:8px; border-radius:50%; flex:none; background:var(--brass); }
+  .registro-nome{ font-family:'Big Shoulders Display',sans-serif; font-weight:700; font-size:12.5px;
+    text-transform:uppercase; letter-spacing:0.02em; }
+  .registro-ia{ font-family:'IBM Plex Mono',monospace; font-size:8.5px; letter-spacing:0.08em;
+    color:var(--ia); border:1px solid var(--ia); border-radius:3px; padding:1px 5px; }
+  .registro-auto{ font-family:'IBM Plex Mono',monospace; font-size:8.5px; letter-spacing:0.08em;
+    color:var(--ink-dim); border:1px solid var(--console-line); border-radius:3px; padding:1px 5px; }
+  .registro-hora{ font-family:'IBM Plex Mono',monospace; font-size:10px; color:var(--ink-dim); margin-left:auto; }
+  .registro-texto{ font-size:13px; line-height:1.5; color:var(--ink-dim); }
+  .registro-texto b{ color:var(--ink); }
+
+  .legenda{ display:flex; gap:18px; flex-wrap:wrap; }
+  .legenda-item{ display:flex; align-items:center; gap:7px; font-size:12px; color:var(--ink-dim); }
+  .legenda-dot{ width:9px; height:9px; border-radius:50%; flex:none; }
+
+  .rodape-nota{
+    margin-top:20px; padding-top:14px; border-top:1px solid var(--console-line);
+    font-family:'IBM Plex Mono',monospace; font-size:10.5px; color:var(--ink-dim);
+    letter-spacing:0.03em; display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px;
+  }
+</style>
+
+<div class="console">
+  <div class="masthead">
+    <div class="masthead-id">ESCRITÓRIO · PROJETO CÓDIGO ÔMEGA</div>
+    <h1>Escritório <span>Ômega</span></h1>
+    <p>Um especialista por cripto, cada um no seu computador, e um Gerente que revisa a mesa
+      inteira. A mesa está ordenada por <b style="color:var(--ink)">quem recebeu o sinal mais recente</b> —
+      o especialista no canto superior esquerdo é sempre o último a ter visto uma mudança. O telão
+      não conta ALTA/BAIXA — mostra o resultado financeiro real, ponderado pelo peso de cada
+      posição no portfólio.</p>
+  </div>
+
+  <div class="cena-wrap" id="cenaWrap">
+    <canvas id="cena" width="920" height="480"></canvas>
+  </div>
+
+  <div class="controle">
+    <button class="ligar" id="btnLigar">Gerente revisa a mesa</button>
+    <div class="controle-nota" id="notaControle"></div>
+  </div>
+
+  <div class="registro">
+    <div class="registro-cabeca">
+      <span>Relatórios do Gerente</span>
+      <span class="registro-nota">nada aqui desaparece — clique pra reabrir</span>
+    </div>
+    <div class="registro-corpo" id="registroCorpo">
+      <div class="registro-vazio">— o gerente ainda não revisou a mesa hoje —</div>
+    </div>
+  </div>
+
+  <div class="legenda">
+    <div class="legenda-item"><span class="legenda-dot" style="background:var(--go)"></span>posição no lucro</div>
+    <div class="legenda-item"><span class="legenda-dot" style="background:var(--stop)"></span>posição no prejuízo</div>
+    <div class="legenda-item"><span class="legenda-dot" style="background:var(--fora)"></span>sem posição aberta</div>
+    <div class="legenda-item"><span class="legenda-dot" style="background:var(--brass)"></span>gerente</div>
+  </div>
+
+  <div class="rodape-nota">
+    <span id="rodapeAtualizado">SNAPSHOT REAL · MONITOR_ESTADO.JSON + PORTFOLIO_V4_PESOS.CSV</span>
+    <span>SEM CHAVE DE API · NENHUMA ORDEM FOI ENVIADA</span>
+  </div>
+</div>
+
+<script>
+/* ==========================================================================
+   dados: se `escritorio_gerar.py` injetou window.OMEGA_ESPECIALISTAS (modo
+   local, rodando no seu PC), usa eles. Senão, cai neste retrato fixo --
+   é o que a versão publicada no claude.ai usa pra demonstração.
+   var% = preço atual / preço do sinal - 1, só pra quem está ALTA;
+   contrib = peso real no portfólio (portfolio_v4_pesos.csv) * var --
+   mesma ponderação que o sombra.py usa de verdade.
+   ========================================================================== */
+const MODO_LOCAL = !!window.OMEGA_MODO_LOCAL;
+const ESPECIALISTAS = window.OMEGA_ESPECIALISTAS || [
+  {t:'LINK',       peso:5.17, alta:false, var:null, desde:'12/09', contrib:0},
+  {t:'BTC',        peso:8.52, alta:false, var:null, desde:'12/09', contrib:0},
+  {t:'HBAR',       peso:2.60, alta:false, var:null, desde:'11/09', contrib:0},
+  {t:'ZEC',        peso:4.04, alta:false, var:null, desde:'11/09', contrib:0},
+  {t:'IMX',        peso:6.43, alta:false, var:null, desde:'11/09', contrib:0},
+  {t:'SUI',        peso:3.64, alta:false, var:null, desde:'11/09', contrib:0},
+  {t:'FET',        peso:7.30, alta:false, var:null, desde:'10/09', contrib:0},
+  {t:'RENDER',     peso:3.88, alta:false, var:null, desde:'10/09', contrib:0},
+  {t:'FLOKI',      peso:2.70, alta:false, var:null, desde:'10/09', contrib:0},
+  {t:'1MBABYDOGE', peso:3.50, alta:false, var:null, desde:'09/09', contrib:0},
+  {t:'INJ',        peso:3.17, alta:true,  var:-9.1, desde:'09/09', contrib:-0.288},
+  {t:'BONK',       peso:2.13, alta:false, var:null, desde:'08/09', contrib:0},
+  {t:'PENGU',      peso:1.52, alta:false, var:null, desde:'08/09', contrib:0},
+  {t:'PEPE',       peso:2.61, alta:false, var:null, desde:'08/09', contrib:0},
+  {t:'API3',       peso:8.83, alta:true,  var:7.0,  desde:'08/09', contrib:0.620},
+  {t:'TRX',        peso:7.84, alta:false, var:null, desde:'01/09', contrib:0},
+  {t:'TAO',        peso:3.84, alta:false, var:null, desde:'30/08', contrib:0},
+  {t:'XRP',        peso:3.14, alta:true,  var:6.4,  desde:'20/08', contrib:0.202},
+  {t:'DOGE',       peso:2.95, alta:true,  var:11.2, desde:'20/08', contrib:0.331},
+  {t:'ETH',        peso:4.62, alta:true,  var:29.6, desde:'17/08', contrib:1.367},
+  {t:'SOL',        peso:5.09, alta:true,  var:28.9, desde:'09/08', contrib:1.470},
+  {t:'BNB',        peso:6.48, alta:true,  var:21.0, desde:'31/07', contrib:1.358},
+];
+const RESUMO_AUTOMATICO = window.OMEGA_RESUMO_AUTOMATICO ||
+  'Resumo automático indisponível — rode escritorio_gerar.py pra atualizar.';
+document.getElementById('rodapeAtualizado').textContent =
+  'DADOS REAIS' + (window.OMEGA_ATUALIZADO_EM ? ' · ATUALIZADO EM ' + window.OMEGA_ATUALIZADO_EM : ' · SNAPSHOT');
+document.getElementById('notaControle').textContent = MODO_LOCAL
+  ? 'O Gerente resume os números reais desta rodada — sem IA, sem custo, sempre certo.'
+  : 'O Gerente pensa de verdade com o Claude ao final da revisão — a primeira vez pode pedir sua permissão.';
+
+// série real de resultado acumulado (0 + cada passo), na mesma ordem acima
+const SERIE_COMPLETA = [0];
+ESPECIALISTAS.reduce((acc,e) => { const n = acc + e.contrib; SERIE_COMPLETA.push(n); return n; }, 0);
+const RESULTADO_FINAL = SERIE_COMPLETA[SERIE_COMPLETA.length-1];
+
+/* ==========================================================================
+   geografia da sala (920x480)
+   ========================================================================== */
+const TELAO = { x:230, y:14, w:460, h:104 };
+const RELOGIO = { x:840, y:56, r:28 };
+const PLANTA = { x:70, y:70 };
+const GERENTE_POS = { x:460, y:168 };
+
+function espacar(n, y, margem){
+  if(n===1) return [{x:460,y}];
+  const largura = 920 - margem*2, passo = largura/(n-1);
+  return Array.from({length:n}, (_,i)=>({x:margem+passo*i, y}));
+}
+const DESKS = [...espacar(8,240,60), ...espacar(8,335,60), ...espacar(6,425,150)];
+
+const especialistas = ESPECIALISTAS.map((e,i) => ({
+  id:'esp-'+e.t, nome:e.t, especialista:true,
+  cor: e.var===null ? '#6b7480' : (e.var>=0 ? '#7cae6f' : '#c96257'),
+  pos:DESKS[i] || {x:460,y:425}, var:e.var, desde:e.desde, alta:e.alta,
+  fase:Math.random()*10, destacado:false,
+}));
+const gerente = {
+  id:'gerente', nome:'Gerente', cor:'#d99a4e', ia:true,
+  pos:{...GERENTE_POS}, fase:Math.random()*10, estado:'sentado', ultimaFala:null, _timerEsconder:null,
+};
+
+const reduzMovimento = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+/* ==========================================================================
+   canvas + desenho
+   ========================================================================== */
+const canvas = document.getElementById('cena');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+let serieAtual = [...SERIE_COMPLETA];
+
+function arredondado(c,x,y,w,h,r){
+  c.beginPath();
+  c.moveTo(x+r,y); c.arcTo(x+w,y,x+w,y+h,r); c.arcTo(x+w,y+h,x,y+h,r);
+  c.arcTo(x,y+h,x,y,r); c.arcTo(x,y,x+w,y,r); c.closePath();
+}
+
+function desenharSala(){
+  ctx.fillStyle = '#1c222c'; ctx.fillRect(0,0,W,H);
+  ctx.fillStyle = '#181e27'; ctx.fillRect(0,0,W,118);
+  ctx.strokeStyle = 'rgba(255,255,255,0.03)'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(0,118); ctx.lineTo(W,118); ctx.stroke();
+  for(let x=70; x<W; x+=170){
+    ctx.fillStyle = 'rgba(255,244,214,0.05)';
+    arredondado(ctx,x,4,110,7,4); ctx.fill();
+  }
+  ctx.strokeStyle = '#252c38';
+  for(let x=-40; x<W+40; x+=46){
+    ctx.beginPath(); ctx.moveTo(x,122); ctx.lineTo(x-30,H); ctx.stroke();
+  }
+}
+
+function desenharPlanta(){
+  const {x,y} = PLANTA;
+  ctx.fillStyle = '#5a4632'; arredondado(ctx,x-12,y+18,24,14,3); ctx.fill();
+  ctx.strokeStyle = '#4a7a52'; ctx.lineWidth = 3; ctx.lineCap='round';
+  [[-6,-4],[6,-4],[0,-10],[-9,4],[9,4]].forEach(([dx,dy])=>{
+    ctx.beginPath(); ctx.moveTo(x,y+18); ctx.lineTo(x+dx, y+dy); ctx.stroke();
+  });
+}
+
+function desenharRelogio(){
+  const {x:cx,y:cy,r} = RELOGIO;
+  const agora = new Date();
+  const seg = agora.getSeconds(), min = agora.getMinutes(), hor = agora.getHours()%12;
+  ctx.save(); ctx.translate(cx,cy);
+  ctx.fillStyle = '#0e1116'; ctx.beginPath(); ctx.arc(0,0,r+5,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#f2ede0'; ctx.beginPath(); ctx.arc(0,0,r,0,Math.PI*2); ctx.fill();
+  for(let i=0;i<12;i++){
+    const a = i*Math.PI/6;
+    ctx.strokeStyle = i%3===0 ? '#241a0d' : '#8a7a5f'; ctx.lineWidth = i%3===0?2:1;
+    ctx.beginPath();
+    ctx.moveTo(Math.cos(a)*(r-3), Math.sin(a)*(r-3));
+    ctx.lineTo(Math.cos(a)*(r-7), Math.sin(a)*(r-7));
+    ctx.stroke();
+  }
+  function mao(ang,comp,largura,cor){
+    ctx.strokeStyle=cor; ctx.lineWidth=largura; ctx.lineCap='round';
+    ctx.beginPath(); ctx.moveTo(0,0);
+    ctx.lineTo(Math.cos(ang-Math.PI/2)*comp, Math.sin(ang-Math.PI/2)*comp);
+    ctx.stroke();
+  }
+  mao((hor+min/60)*(Math.PI/6), r*0.5, 2.6, '#241a0d');
+  mao((min+seg/60)*(Math.PI/30), r*0.72, 2, '#241a0d');
+  mao(seg*(Math.PI/30), r*0.82, 1, '#c96257');
+  ctx.fillStyle='#241a0d'; ctx.beginPath(); ctx.arc(0,0,2,0,Math.PI*2); ctx.fill();
+  ctx.restore();
+}
+
+function desenharTelao(){
+  const {x,y,w,h} = TELAO;
+  ctx.fillStyle = '#0e1116'; arredondado(ctx,x-6,y-6,w+12,h+16,6); ctx.fill();
+  ctx.fillStyle = '#10161a'; arredondado(ctx,x,y,w,h,3); ctx.fill();
+
+  ctx.font = "600 9px 'IBM Plex Mono', monospace"; ctx.fillStyle = '#6f8a8b'; ctx.textBaseline = 'top';
+  ctx.fillText('CÓDIGO ÔMEGA · RESULTADO FLUTUANTE DO PORTFÓLIO', x+14, y+9);
+
+  const valor = serieAtual[serieAtual.length-1] || 0;
+  const positivo = valor >= 0;
+  ctx.font = "800 30px 'Big Shoulders Display', sans-serif";
+  ctx.fillStyle = positivo ? '#9fd6a0' : '#e08b7f';
+  ctx.fillText((positivo?'+':'')+valor.toFixed(2)+'%', x+14, y+22);
+
+  const gx=x+14, gy=y+62, gw=w-28, gh=h-74;
+  const minV = Math.min(0,...SERIE_COMPLETA)-0.6, maxV = Math.max(...SERIE_COMPLETA)+0.7;
+  const px = i => gx + (i/(SERIE_COMPLETA.length-1))*gw;
+  const py = v => gy + gh - ((v-minV)/(maxV-minV))*gh;
+
+  if(minV<0 && maxV>0){
+    ctx.strokeStyle='rgba(255,255,255,0.14)'; ctx.setLineDash([3,3]); ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(gx,py(0)); ctx.lineTo(gx+gw,py(0)); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  if(serieAtual.length>1){
+    ctx.beginPath();
+    serieAtual.forEach((v,i)=>{ const X=px(i),Y=py(v); if(i===0) ctx.moveTo(X,Y); else ctx.lineTo(X,Y); });
+    ctx.lineTo(px(serieAtual.length-1), py(Math.max(minV,0)));
+    ctx.lineTo(px(0), py(Math.max(minV,0)));
+    ctx.closePath();
+    ctx.globalAlpha=0.14; ctx.fillStyle = positivo?'#7cae6f':'#c96257'; ctx.fill(); ctx.globalAlpha=1;
+
+    ctx.strokeStyle = positivo ? '#7cae6f' : '#c96257'; ctx.lineWidth=2.2; ctx.lineJoin='round';
+    ctx.beginPath();
+    serieAtual.forEach((v,i)=>{ const X=px(i),Y=py(v); if(i===0) ctx.moveTo(X,Y); else ctx.lineTo(X,Y); });
+    ctx.stroke();
+
+    const u = serieAtual.length-1;
+    ctx.fillStyle = positivo?'#9fd6a0':'#e08b7f';
+    ctx.beginPath(); ctx.arc(px(u), py(serieAtual[u]), 3.4, 0, Math.PI*2); ctx.fill();
+  }
+}
+
+function desenharMesa(pos, ativa, cor, grande){
+  const escala = grande ? 1.35 : 1;
+  const lx = pos.x - 30*escala, ty = pos.y + 16*escala;
+  ctx.fillStyle = '#43352450'; arredondado(ctx,pos.x-2,pos.y+24*escala,64*escala,10,3); ctx.fill();
+  ctx.fillStyle = grande ? '#6b5738' : '#5a4632'; arredondado(ctx,lx,ty,60*escala,14*escala,3); ctx.fill();
+  if(grande){ ctx.strokeStyle='#d99a4e55'; ctx.lineWidth=1.4; arredondado(ctx,lx,ty,60*escala,14*escala,3); ctx.stroke(); }
+  ctx.fillStyle = '#0c0f13'; arredondado(ctx, pos.x-11*escala, pos.y+13*escala, 22*escala, 6*escala, 2); ctx.fill();
+  ctx.fillStyle = '#111418'; arredondado(ctx,pos.x-16*escala,pos.y-6*escala,32*escala,22*escala,3); ctx.fill();
+  ctx.fillStyle = ativa ? cor : '#20262e';
+  ctx.globalAlpha = ativa ? 0.85 : 1;
+  arredondado(ctx,pos.x-13*escala,pos.y-3*escala,26*escala,15*escala,2); ctx.fill(); ctx.globalAlpha = 1;
+  if(ativa){
+    ctx.strokeStyle = cor; ctx.globalAlpha = 0.32; ctx.lineWidth = 9;
+    ctx.beginPath(); ctx.arc(pos.x, pos.y+4*escala, 19*escala, 0, Math.PI*2); ctx.stroke(); ctx.globalAlpha = 1;
+  }
+}
+
+function desenharPersonagem(p, escala){
+  escala = escala || 1;
+  const {x,y} = p.pos;
+  const pensando = p.estado === 'pensando';
+  const boboceio = reduzMovimento ? 0 : Math.sin(p.fase*1.6)*1.3;
+  const destaquePulso = p.destacado ? (Math.sin(p.fase*14)*0.5+0.5) : 0;
+
+  ctx.save(); ctx.translate(x, y); ctx.scale(escala, escala);
+
+  ctx.fillStyle = 'rgba(0,0,0,0.28)';
+  ctx.beginPath(); ctx.ellipse(0, 30, 12, 4, 0, 0, Math.PI*2); ctx.fill();
+
+  if(destaquePulso > 0){
+    ctx.strokeStyle = p.cor; ctx.globalAlpha = 0.25 + destaquePulso*0.3; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(0,-14-boboceio,17,0,Math.PI*2); ctx.stroke(); ctx.globalAlpha = 1;
+  }
+  if(p.ia){
+    ctx.strokeStyle = '#a08fe0'; ctx.globalAlpha = pensando ? (0.5+Math.sin(p.fase*6)*0.3) : 0.5;
+    ctx.lineWidth = 1.4;
+    ctx.beginPath(); ctx.arc(0, -14-boboceio, 13, 0, Math.PI*2); ctx.stroke(); ctx.globalAlpha = 1;
+  }
+
+  ctx.strokeStyle = 'rgba(0,0,0,0.35)'; ctx.lineWidth = 3.2; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(-4, 16); ctx.lineTo(-4, 29); ctx.moveTo(4, 16); ctx.lineTo(4, 29); ctx.stroke();
+
+  ctx.fillStyle = p.cor; arredondado(ctx, -9, -2, 18, 19, 6); ctx.fill();
+
+  ctx.strokeStyle = p.cor; ctx.lineWidth = 3.2;
+  ctx.beginPath(); ctx.moveTo(9,2); ctx.lineTo(11,14); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(-9,2); ctx.lineTo(-11,14); ctx.stroke();
+
+  const headY = -14 - boboceio;
+  ctx.fillStyle = p.cor; ctx.beginPath(); ctx.arc(0, headY, 9, 0, Math.PI*2); ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,0.3)'; ctx.lineWidth = 1.6;
+  ctx.beginPath(); ctx.moveTo(-5, headY+2); ctx.lineTo(5, headY+2); ctx.stroke();
+  ctx.fillStyle = '#12161d';
+  ctx.beginPath(); ctx.arc(-3, headY-1, 1.3, 0, Math.PI*2); ctx.arc(3, headY-1, 1.3, 0, Math.PI*2); ctx.fill();
+
+  ctx.restore();
+}
+
+function desenhar(){
+  desenharSala();
+  desenharPlanta();
+  desenharTelao();
+  desenharRelogio();
+  desenharMesa(gerente.pos, true, gerente.cor, true);
+  especialistas.forEach(p => desenharMesa(p.pos, true, p.cor, false));
+  desenharPersonagem(gerente, 1.15);
+  especialistas.forEach(p => desenharPersonagem(p));
+}
+
+function loop(){
+  especialistas.forEach(p => p.fase += 0.02);
+  gerente.fase += 0.02;
+  desenhar();
+  posicionarOverlays();
+  requestAnimationFrame(loop);
+}
+
+/* ==========================================================================
+   overlays: tags fixas por cripto + bolha de fala do gerente
+   ========================================================================== */
+const wrap = document.getElementById('cenaWrap');
+
+const tags = {};
+especialistas.forEach(p => {
+  const el = document.createElement('div');
+  el.className = 'tag-cripto';
+  el.style.background = p.var===null ? 'rgba(255,255,255,0.06)'
+                        : (p.var>=0 ? 'rgba(124,174,111,0.18)' : 'rgba(201,98,87,0.18)');
+  el.style.color = p.cor;
+  el.innerHTML = `<span class="var">${p.var===null?'fora':(p.var>=0?'+':'')+p.var.toFixed(1)+'%'}</span>
+                  <span class="nome">${p.nome}</span>`;
+  wrap.appendChild(el);
+  tags[p.id] = el;
+});
+
+const bolhaGerente = document.createElement('div');
+bolhaGerente.className = 'bolha';
+wrap.appendChild(bolhaGerente);
+
+function posicionarOverlays(){
+  const escala = wrap.clientWidth / W;
+  especialistas.forEach(p => {
+    const el = tags[p.id];
+    el.style.left = (p.pos.x * escala) + 'px';
+    el.style.top  = ((p.pos.y - 26) * escala) + 'px';
+  });
+  bolhaGerente.style.left = (gerente.pos.x * escala) + 'px';
+  bolhaGerente.style.top  = ((gerente.pos.y - 32) * escala) + 'px';
+}
+function mostrarBolhaGerente(html, comCursor){
+  bolhaGerente.innerHTML = `<span class="bolha-nome">Gerente</span>${html}${comCursor?'<span class="cursor">▌</span>':''}`;
+  bolhaGerente.classList.add('mostrar');
+}
+function esconderBolhaGerente(){ bolhaGerente.classList.remove('mostrar'); }
+
+/* ==========================================================================
+   clique: especialista mostra ficha rápida; gerente reabre o último relatório
+   ========================================================================== */
+function alvoEm(clientX, clientY){
+  const rect = canvas.getBoundingClientRect();
+  const escala = canvas.width / rect.width;
+  const cx = (clientX - rect.left) * escala, cy = (clientY - rect.top) * escala;
+  if(Math.hypot(cx-gerente.pos.x, cy-(gerente.pos.y-8)) < 26) return gerente;
+  return especialistas.find(p => Math.hypot(cx-p.pos.x, cy-(p.pos.y-8)) < 20);
+}
+canvas.addEventListener('mousemove', e => {
+  canvas.style.cursor = alvoEm(e.clientX, e.clientY) ? 'pointer' : 'default';
+});
+let bolhaTemp = null, bolhaTempTimer = null;
+canvas.addEventListener('click', e => {
+  const alvo = alvoEm(e.clientX, e.clientY);
+  if(!alvo) return;
+  if(alvo === gerente){
+    if(gerente.ultimaFala){
+      mostrarBolhaGerente(gerente.ultimaFala);
+      clearTimeout(gerente._timerEsconder);
+      gerente._timerEsconder = setTimeout(esconderBolhaGerente, 5000);
+    }
+    return;
+  }
+  if(bolhaTemp) { bolhaTemp.remove(); clearTimeout(bolhaTempTimer); }
+  bolhaTemp = document.createElement('div');
+  bolhaTemp.className = 'bolha mostrar';
+  bolhaTemp.innerHTML = `<span class="bolha-nome">${alvo.nome}</span>` +
+    (alvo.var===null
+      ? `Sem posição aberta. Sinal virou BAIXA em ${alvo.desde}.`
+      : `<b>${alvo.var>=0?'+':''}${alvo.var.toFixed(1)}%</b> desde a entrada, em ${alvo.desde}.`);
+  wrap.appendChild(bolhaTemp);
+  const escala = wrap.clientWidth / W;
+  bolhaTemp.style.left = (alvo.pos.x*escala)+'px';
+  bolhaTemp.style.top = ((alvo.pos.y-26)*escala)+'px';
+  bolhaTempTimer = setTimeout(()=>{ bolhaTemp && bolhaTemp.remove(); bolhaTemp=null; }, 3200);
+});
+
+/* ==========================================================================
+   registro permanente
+   ========================================================================== */
+function registrar(textoHtml, gerado){
+  const corpo = document.getElementById('registroCorpo');
+  if(corpo.querySelector('.registro-vazio')) corpo.innerHTML = '';
+  const div = document.createElement('div');
+  div.className = 'registro-linha';
+  const hora = new Date().toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});
+  const selo = gerado === 'auto' ? '<span class="registro-auto">AUTOMÁTICO</span>' : '<span class="registro-ia">IA</span>';
+  div.innerHTML = `<div class="registro-topo">
+      <span class="registro-dot"></span><span class="registro-nome">Gerente</span>
+      ${selo}<span class="registro-hora">${hora}</span>
+    </div><div class="registro-texto">${textoHtml}</div>`;
+  div.addEventListener('click', () => {
+    mostrarBolhaGerente(textoHtml);
+    clearTimeout(gerente._timerEsconder);
+    gerente._timerEsconder = setTimeout(esconderBolhaGerente, 5000);
+  });
+  corpo.appendChild(div);
+  corpo.scrollTop = corpo.scrollHeight;
+}
+
+/* ==========================================================================
+   IA de verdade (só existe na página publicada no claude.ai; no arquivo
+   local, MODO_LOCAL já pula direto pro resumo automático)
+   ========================================================================== */
+let sampleFn = null;
+(async () => {
+  if (MODO_LOCAL) return;
+  try {
+    if (window.claude && typeof window.claude.use === 'function') {
+      sampleFn = await window.claude.use('sample');
+    }
+  } catch(e) { sampleFn = null; }
+  if (!sampleFn) {
+    document.getElementById('notaControle').innerHTML =
+      'Sem acesso à IA ao vivo aqui — o Gerente vai avisar em vez de pensar de verdade. ' +
+      'Abra a versão publicada para ver o relatório real.';
+  }
+})();
+
+function esperar(ms){ return new Promise(r=>setTimeout(r,ms)); }
+
+/* ==========================================================================
+   revisão da mesa
+   ========================================================================== */
+const btn = document.getElementById('btnLigar');
+btn.addEventListener('click', revisarMesa);
+
+async function revisarMesa(){
+  btn.disabled = true; btn.textContent = 'Gerente revisando…';
+  serieAtual = [0];
+
+  for(const p of especialistas){
+    p.destacado = true;
+    await esperar(110);
+    const i = especialistas.indexOf(p);
+    serieAtual.push(serieAtual[serieAtual.length-1] + (SERIE_COMPLETA[i+1] - SERIE_COMPLETA[i]));
+    p.destacado = false;
+  }
+
+  gerente.estado = 'pensando';
+  mostrarBolhaGerente('<i>pensando…</i>');
+
+  // ---- modo local: resumo automático, sem IA, sem custo -------------------
+  if (MODO_LOCAL) {
+    await esperar(500);
+    mostrarBolhaGerente(RESUMO_AUTOMATICO);
+    gerente.ultimaFala = RESUMO_AUTOMATICO;
+    registrar(RESUMO_AUTOMATICO, 'auto');
+    gerente.estado = 'sentado';
+    await esperar(4200); esconderBolhaGerente();
+    btn.disabled = false; btn.textContent = 'Rodar de novo';
+    return;
+  }
+
+  // ---- modo hospedado: o Gerente pensa de verdade com o Claude -----------
+  const maiores = [...ESPECIALISTAS].filter(e=>e.alta).sort((a,b)=>b.contrib-a.contrib).slice(0,3)
+    .map(e=>`${e.t} (${e.var>=0?'+':''}${e.var.toFixed(1)}%)`).join(', ');
+  const piorAbertura = [...ESPECIALISTAS].filter(e=>e.alta).sort((a,b)=>a.contrib-b.contrib)[0];
+  const nAbertos = ESPECIALISTAS.filter(e=>e.alta).length;
+
+  const prompt = `
+Você é o "Gerente" de uma sala com ${ESPECIALISTAS.length} especialistas, cada um cuidando de uma
+criptomoeda, dentro de um painel de monitoramento pessoal chamado Código Ômega. Você acabou de
+revisar a mesa inteira. Explique o resultado em português, de forma clara e direta. NÃO invente
+nenhum número que não esteja abaixo, e NÃO recomende comprar ou vender — isso não é conselho de
+investimento.
+
+DADOS REAIS DESTA REVISÃO:
+- Resultado flutuante do portfólio agora (ponderado pelo peso real de cada posição): ${RESULTADO_FINAL>=0?'+':''}${RESULTADO_FINAL.toFixed(2)}%
+- Maiores contribuições positivas: ${maiores || 'nenhuma'}
+- ${piorAbertura && piorAbertura.var<0 ? `Pior desempenho entre as posições abertas: ${piorAbertura.t} (${piorAbertura.var.toFixed(1)}%)` : ''}
+- ${nAbertos} de ${ESPECIALISTAS.length} ativos têm posição aberta agora; os outros estão de fora, sem lucro nem prejuízo a reportar
+
+Escreva de 2 a 3 frases BEM curtas (balão de fala pequeno), tom de gerente que confia na equipe mas
+é direto com os números, dirigindo-se ao dono do sistema (Danilo) como "você". Sem saudação.`.trim();
+
+  if (!sampleFn) {
+    await esperar(700);
+    mostrarBolhaGerente('<i style="color:var(--stop)">sem acesso à IA nesta visualização</i>');
+    await esperar(1800); esconderBolhaGerente();
+    gerente.estado = 'sentado'; btn.disabled = false; btn.textContent = 'Rodar de novo';
+    return;
+  }
+  try {
+    const resultado = await sampleFn(prompt, {
+      modelTier: 'default',
+      onText: ({text}) => mostrarBolhaGerente(text.replace(/\n/g,'<br>'), true),
+    });
+    const textoFinal = resultado.text.replace(/\n/g,'<br>');
+    mostrarBolhaGerente(textoFinal);
+    gerente.ultimaFala = textoFinal;
+    registrar(textoFinal, 'ia');
+    gerente.estado = 'sentado';
+    await esperar(4000); esconderBolhaGerente();
+  } catch(e) {
+    const msg = (e && e.code === 'not_granted') ? 'sem permissão pra pensar dessa vez' : 'não consegui pensar agora';
+    mostrarBolhaGerente(`<i style="color:var(--stop)">${msg}</i>`);
+    gerente.estado = 'sentado';
+    await esperar(1800); esconderBolhaGerente();
+  }
+  btn.disabled = false; btn.textContent = 'Rodar de novo';
+}
+
+/* ==========================================================================
+   start
+   ========================================================================== */
+desenhar();
+requestAnimationFrame(loop);
+</script>
