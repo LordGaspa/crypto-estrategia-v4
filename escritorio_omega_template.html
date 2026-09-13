@@ -121,11 +121,12 @@
   <div class="masthead">
     <div class="masthead-id">ESCRITÓRIO · PROJETO CÓDIGO ÔMEGA</div>
     <h1>Escritório <span>Ômega</span></h1>
-    <p>Um especialista por cripto, cada um no seu computador, e um Gerente que revisa a mesa
-      inteira. A mesa está ordenada por <b style="color:var(--ink)">quem recebeu o sinal mais recente</b> —
-      o especialista no canto superior esquerdo é sempre o último a ter visto uma mudança. O telão
-      não conta ALTA/BAIXA — mostra o resultado financeiro real, ponderado pelo peso de cada
-      posição no portfólio.</p>
+    <p>Um especialista por cripto, cada um no seu computador, um Gerente que revisa a mesa inteira,
+      um Guardião que confere as travas de segurança de verdade (<code>guardrails.py</code>) e um
+      Reconciliador que confere o próprio registro da Sombra. A mesa está ordenada por
+      <b style="color:var(--ink)">quem recebeu o sinal mais recente</b> — o especialista no canto
+      superior esquerdo é sempre o último a ter visto uma mudança. O telão não conta ALTA/BAIXA —
+      mostra o resultado financeiro real, ponderado pelo peso de cada posição no portfólio.</p>
   </div>
 
   <div class="cena-wrap" id="cenaWrap">
@@ -152,6 +153,8 @@
     <div class="legenda-item"><span class="legenda-dot" style="background:var(--stop)"></span>posição no prejuízo</div>
     <div class="legenda-item"><span class="legenda-dot" style="background:var(--fora)"></span>sem posição aberta</div>
     <div class="legenda-item"><span class="legenda-dot" style="background:var(--brass)"></span>gerente</div>
+    <div class="legenda-item"><span class="legenda-dot" style="background:#5c8fc2"></span>guardião · travas</div>
+    <div class="legenda-item"><span class="legenda-dot" style="background:#b08968"></span>reconciliador · registro</div>
   </div>
 
   <div class="rodape-nota">
@@ -196,6 +199,17 @@ const ESPECIALISTAS = window.OMEGA_ESPECIALISTAS || [
 ];
 const RESUMO_AUTOMATICO = window.OMEGA_RESUMO_AUTOMATICO ||
   'Resumo automático indisponível — rode escritorio_gerar.py pra atualizar.';
+
+// dados do Guardião (guardrails.py de verdade) e do Reconciliador (registro
+// da própria Sombra) -- injetados pelo escritorio_gerar.py. Sem injeção
+// (versão publicada no claude.ai), cai num retrato "tudo OK" de exemplo.
+const ADMIN_DADOS = window.OMEGA_ADMIN || {
+  guardiao: { ok:3, total:3, parado:false, exposicaoPct:0,
+    fala:'<b>3/3</b> travas OK. Dado fresco. Exposição: <b>0.0%</b> do capital de referência.' },
+  reconciliador: { posicoes:0, decisoes:0,
+    fala:'0 posição(ões) no registro da Sombra agora. 0 decisões registradas ao todo. '+
+         'Reconciliação contra a corretora real entra na Fase 5.' },
+};
 document.getElementById('rodapeAtualizado').textContent =
   'DADOS REAIS' + (window.OMEGA_ATUALIZADO_EM ? ' · ATUALIZADO EM ' + window.OMEGA_ATUALIZADO_EM : ' · SNAPSHOT');
 document.getElementById('notaControle').textContent = MODO_LOCAL
@@ -214,6 +228,8 @@ const TELAO = { x:230, y:14, w:460, h:104 };
 const RELOGIO = { x:840, y:56, r:28 };
 const PLANTA = { x:70, y:70 };
 const GERENTE_POS = { x:460, y:168 };
+const GUARDIAO_POS = { x:330, y:172 };
+const RECONCILIADOR_POS = { x:590, y:172 };
 
 function espacar(n, y, margem){
   if(n===1) return [{x:460,y}];
@@ -231,6 +247,15 @@ const especialistas = ESPECIALISTAS.map((e,i) => ({
 const gerente = {
   id:'gerente', nome:'Gerente', cor:'#d99a4e', ia:true,
   pos:{...GERENTE_POS}, fase:Math.random()*10, estado:'sentado', ultimaFala:null, _timerEsconder:null,
+};
+const guardiao = {
+  id:'guardiao', nome:'Guardião',
+  cor: ADMIN_DADOS.guardiao.parado ? '#c96257' : '#5c8fc2',
+  pos:{...GUARDIAO_POS}, fase:Math.random()*10, ultimaFala:ADMIN_DADOS.guardiao.fala,
+};
+const reconciliador = {
+  id:'reconciliador', nome:'Reconciliador', cor:'#b08968',
+  pos:{...RECONCILIADOR_POS}, fase:Math.random()*10, ultimaFala:ADMIN_DADOS.reconciliador.fala,
 };
 
 const reduzMovimento = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -408,14 +433,20 @@ function desenhar(){
   desenharTelao();
   desenharRelogio();
   desenharMesa(gerente.pos, true, gerente.cor, true);
+  desenharMesa(guardiao.pos, true, guardiao.cor, false);
+  desenharMesa(reconciliador.pos, true, reconciliador.cor, false);
   especialistas.forEach(p => desenharMesa(p.pos, true, p.cor, false));
   desenharPersonagem(gerente, 1.15);
+  desenharPersonagem(guardiao, 1.05);
+  desenharPersonagem(reconciliador, 1.05);
   especialistas.forEach(p => desenharPersonagem(p));
 }
 
 function loop(){
   especialistas.forEach(p => p.fase += 0.02);
   gerente.fase += 0.02;
+  guardiao.fase += 0.02;
+  reconciliador.fase += 0.02;
   desenhar();
   posicionarOverlays();
   requestAnimationFrame(loop);
@@ -439,6 +470,22 @@ especialistas.forEach(p => {
   tags[p.id] = el;
 });
 
+const tagGuardiao = document.createElement('div');
+tagGuardiao.className = 'tag-cripto';
+tagGuardiao.style.background = ADMIN_DADOS.guardiao.parado ? 'rgba(201,98,87,0.18)' : 'rgba(92,143,194,0.18)';
+tagGuardiao.style.color = guardiao.cor;
+tagGuardiao.innerHTML = `<span class="var">${ADMIN_DADOS.guardiao.parado ? 'TRAVADO' : ADMIN_DADOS.guardiao.ok+'/'+ADMIN_DADOS.guardiao.total}</span>
+                         <span class="nome">GUARDIÃO</span>`;
+wrap.appendChild(tagGuardiao);
+
+const tagReconciliador = document.createElement('div');
+tagReconciliador.className = 'tag-cripto';
+tagReconciliador.style.background = 'rgba(176,137,104,0.18)';
+tagReconciliador.style.color = reconciliador.cor;
+tagReconciliador.innerHTML = `<span class="var">${ADMIN_DADOS.reconciliador.posicoes} pos.</span>
+                              <span class="nome">RECONCIL.</span>`;
+wrap.appendChild(tagReconciliador);
+
 const bolhaGerente = document.createElement('div');
 bolhaGerente.className = 'bolha';
 wrap.appendChild(bolhaGerente);
@@ -450,6 +497,10 @@ function posicionarOverlays(){
     el.style.left = (p.pos.x * escala) + 'px';
     el.style.top  = ((p.pos.y - 26) * escala) + 'px';
   });
+  tagGuardiao.style.left = (guardiao.pos.x * escala) + 'px';
+  tagGuardiao.style.top  = ((guardiao.pos.y - 26) * escala) + 'px';
+  tagReconciliador.style.left = (reconciliador.pos.x * escala) + 'px';
+  tagReconciliador.style.top  = ((reconciliador.pos.y - 26) * escala) + 'px';
   bolhaGerente.style.left = (gerente.pos.x * escala) + 'px';
   bolhaGerente.style.top  = ((gerente.pos.y - 32) * escala) + 'px';
 }
@@ -467,6 +518,8 @@ function alvoEm(clientX, clientY){
   const escala = canvas.width / rect.width;
   const cx = (clientX - rect.left) * escala, cy = (clientY - rect.top) * escala;
   if(Math.hypot(cx-gerente.pos.x, cy-(gerente.pos.y-8)) < 26) return gerente;
+  if(Math.hypot(cx-guardiao.pos.x, cy-(guardiao.pos.y-8)) < 22) return guardiao;
+  if(Math.hypot(cx-reconciliador.pos.x, cy-(reconciliador.pos.y-8)) < 22) return reconciliador;
   return especialistas.find(p => Math.hypot(cx-p.pos.x, cy-(p.pos.y-8)) < 20);
 }
 canvas.addEventListener('mousemove', e => {
@@ -487,15 +540,19 @@ canvas.addEventListener('click', e => {
   if(bolhaTemp) { bolhaTemp.remove(); clearTimeout(bolhaTempTimer); }
   bolhaTemp = document.createElement('div');
   bolhaTemp.className = 'bolha mostrar';
-  bolhaTemp.innerHTML = `<span class="bolha-nome">${alvo.nome}</span>` +
-    (alvo.var===null
-      ? `Sem posição aberta. Sinal virou BAIXA em ${alvo.desde}.`
-      : `<b>${alvo.var>=0?'+':''}${alvo.var.toFixed(1)}%</b> desde a entrada, em ${alvo.desde}.`);
+  if(alvo === guardiao || alvo === reconciliador){
+    bolhaTemp.innerHTML = `<span class="bolha-nome">${alvo.nome}</span>${alvo.ultimaFala}`;
+  } else {
+    bolhaTemp.innerHTML = `<span class="bolha-nome">${alvo.nome}</span>` +
+      (alvo.var===null
+        ? `Sem posição aberta. Sinal virou BAIXA em ${alvo.desde}.`
+        : `<b>${alvo.var>=0?'+':''}${alvo.var.toFixed(1)}%</b> desde a entrada, em ${alvo.desde}.`);
+  }
   wrap.appendChild(bolhaTemp);
   const escala = wrap.clientWidth / W;
   bolhaTemp.style.left = (alvo.pos.x*escala)+'px';
   bolhaTemp.style.top = ((alvo.pos.y-26)*escala)+'px';
-  bolhaTempTimer = setTimeout(()=>{ bolhaTemp && bolhaTemp.remove(); bolhaTemp=null; }, 3200);
+  bolhaTempTimer = setTimeout(()=>{ bolhaTemp && bolhaTemp.remove(); bolhaTemp=null; }, 4200);
 });
 
 /* ==========================================================================
