@@ -46,6 +46,11 @@ sinal/entrada/saída em `estrategia_core.py` sem uma trilha de comparação.
   `cache_dados/{symbol}_{interval}.parquet`; se a Binance bloquear por geolocalização (ex.: deploy
   no Streamlit Cloud), cai pro cache mesmo desatualizado — não deixa o app quebrar. Compartilhado
   por todos os outros scripts v4/v5.
+  **`DATA_CORTE_HOLDOUT` (2025-07-28 20:00 UTC)** é o corte REAL do holdout lacrado (reconstruído
+  dos inícios em `holdout_v4_resultado.csv`; reproduz os 22 ativos). `separar_periodos(..., corte=)`
+  usa ele; sem `corte` o comportamento antigo ("últimos 12 meses a partir de hoje") continua, e é
+  o que os scripts de pesquisa usam. O app usa o corte fixo: a janela móvel andava com o
+  calendário e passava a chamar de "desenvolvimento" dado que já é fora da amostra.
 - `otimizador_v4.py`: rankeia por **Calmar Ratio** (retorno anualizado / drawdown máximo), com
   o mesmo Score de Robustez do v2 aplicado sobre o Calmar (vizinhança raio 3, pesos
   decrescentes `{1: 1.0, 2: 0.5, 3: 0.25}` em cada uma das 5 dimensões do grid). Calcula também o
@@ -122,6 +127,20 @@ otimizados por ativo por **2 receitas fixas, uma por grupo de liquidez**, muito 
   - Análise detalhada por ativo: gráfico de capital estratégia vs buy&hold com calendário
     editável (`curva_capital_intervalo()`), separando visualmente desenvolvimento e holdout.
   - Cards do radar ordenados pela data do último cruzamento (sinal mais recente primeiro).
+  - Diário de trades no detalhe de cada ativo (2026-10-09): marcadores ▲/▼ no gráfico e tabela
+    com todos os trades da janela (capital partindo de $1000). Vem de
+    `executar_backtest_v4(..., incluir_trades=True)` — flag aditiva, desligada por padrão; os
+    trades batem centavo a centavo com a curva de equity.
+  - Reorganização de 2026-10-09: navegação em 4 seções (Radar | Portfólio | Sombra & Execução |
+    Validação), só a escolhida é calculada. Preços ao vivo (`atualizar_precos_ao_vivo()`, 22
+    downloads em paralelo, cache de 5 min; a `versao` invalida os caches derivados) com aviso de
+    dados velhos (>6h, caso do Streamlit Cloud). Horários exibidos em Brasília (`brt()`; dados
+    continuam em UTC). Holdout com corte fixo. Textos que citavam números à mão agora são
+    calculados dos CSVs. Radar com filtros (sinal, grupo, novos 48h) e ordenação.
+  - Testar sem navegador: `streamlit.testing.v1.AppTest` (trocando `session_state["nav"]`).
+- `sombra_analise.py`: leitura/análise da Fase 4 (resultado com custo, disponibilidade do PC pelo
+  `monitor.log`, custo de execução, backtest × sombra por trade). Usado pela seção "Sombra &
+  Execução" do app e pensado para os agentes do Escritório. Testes em `tests/test_sombra_analise.py`.
   - Para rodar: `.venv\Scripts\streamlit run app_v4.py` (a partir da raiz do projeto).
 
 ### Linha descartada — day-trade curto (Fase 1)

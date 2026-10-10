@@ -51,6 +51,14 @@ CACHE_VALIDADE_HORAS = 24
 
 HOLDOUT_MESES = 12
 
+# Corte REAL do holdout lacrado: o instante em que holdout_v4.py rodou (2026-07-28)
+# menos 12 meses. Reconstruído dos inícios em holdout_v4_resultado.csv (4h começa
+# em 28/07, 6h/8h/12h em 29/07 => corte entre 18:00 e 20:00 UTC). Tudo depois disto
+# nunca foi visto na derivação da RECEITA_ROBUSTA. `separar_periodos(..., corte=)`
+# usa isto em vez da janela "últimos 12 meses a partir de hoje", que anda com o
+# calendário e passaria a chamar de "desenvolvimento" dado que já é fora da amostra.
+DATA_CORTE_HOLDOUT = pd.Timestamp("2025-07-28 20:00")
+
 TIMEFRAME_MAP = {
     "4h": Client.KLINE_INTERVAL_4HOUR,
     "6h": Client.KLINE_INTERVAL_6HOUR,
@@ -279,16 +287,20 @@ def carregar_dados(symbol: str, interval_str: str, max_idade_horas: float = None
         return pd.DataFrame()
 
 
-def separar_periodos(datas: pd.Series, hoje: datetime = None) -> dict:
+def separar_periodos(datas: pd.Series, hoje: datetime = None, corte=None) -> dict:
     """Divide a série de timestamps em período de desenvolvimento (tudo menos
     os últimos HOLDOUT_MESES) e período lacrado (holdout). Retorna índices e
     datas de corte. `hoje` é injetável só pra testes; em uso normal usa
-    datetime.now()."""
+    datetime.now(). `corte` (ex.: DATA_CORTE_HOLDOUT) fixa a data de corte e
+    ignora `hoje` — o holdout passa a crescer com o tempo em vez de andar."""
     datas = datas.reset_index(drop=True).astype("datetime64[ns]")
     n_total = len(datas)
-    if hoje is None:
-        hoje = datetime.now()
-    corte_data = pd.Timestamp(hoje).as_unit("ns") - relativedelta(months=HOLDOUT_MESES)
+    if corte is not None:
+        corte_data = pd.Timestamp(corte).as_unit("ns")
+    else:
+        if hoje is None:
+            hoje = datetime.now()
+        corte_data = pd.Timestamp(hoje).as_unit("ns") - relativedelta(months=HOLDOUT_MESES)
     idx_corte = int(datas.searchsorted(corte_data))
     idx_corte = max(0, min(idx_corte, n_total))
     return {

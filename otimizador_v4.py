@@ -77,10 +77,15 @@ def executar_backtest_v4(
     slippage: float,
     candles_por_dia: int,
     incluir_equity: bool = False,
+    incluir_trades: bool = False,
 ) -> dict:
     """Entrada, stop e saída IGUAIS ao v2 (stop fixo OU cruzamento contrário).
     Adiciona slippage na execução e calcula retorno anualizado, Calmar e
-    Sharpe (pra Deflated Sharpe depois)."""
+    Sharpe (pra Deflated Sharpe depois).
+
+    `incluir_trades=True` devolve também a lista de trades (índices relativos a
+    `inicio`), com o MESMO capital da equity — só leitura, não altera nenhum
+    número. Um trade ainda aberto no fim vem com `saida_idx=None`."""
     m_rapida = df_arrays[f"ma_{p['media_rapida']}"][inicio:fim]
     m_lenta = df_arrays[f"ma_{p['media_lenta']}"][inicio:fim]
     m_filtro = df_arrays[f"ma_f_{p['media_filtro']}"][inicio:fim]
@@ -117,13 +122,17 @@ def executar_backtest_v4(
     equity_curve = np.empty(n)
     equity_curve[0] = capital
 
+    trades = []
     ev_idx = 0
     n_ev = len(eventos)
     for i in range(1, n):
         if ev_idx < n_ev and eventos[ev_idx][1] == i:
-            tipo, _idx, preco_ev, _stop = eventos[ev_idx]
+            tipo, _idx, preco_ev, stop_ev = eventos[ev_idx]
             if tipo == "entrada":
                 # preco_ev = abertura[i] * (1 + slippage) (definido no core)
+                if incluir_trades:
+                    trades.append({"entrada_idx": i, "preco_entrada": float(preco_ev),
+                                   "stop": float(stop_ev), "capital_entrada": float(capital)})
                 quantidade_ativo = (capital / preco_ev) * (1 - taxa)
                 posicionado = True
             else:  # saida
@@ -131,8 +140,16 @@ def executar_backtest_v4(
                 capital = (quantidade_ativo * preco_saida) * (1 - taxa)
                 posicionado = False
                 num_trades += 1
+                if incluir_trades:
+                    trades[-1].update({"saida_idx": i, "preco_saida": float(preco_saida),
+                                       "motivo": "stop" if minima[i] < stop_ev else "cruzamento",
+                                       "capital_saida": float(capital)})
             ev_idx += 1
         equity_curve[i] = capital if not posicionado else (quantidade_ativo * fechamento[i])
+
+    if incluir_trades and posicionado and trades:
+        trades[-1].update({"saida_idx": None, "preco_saida": float(fechamento[-1]),
+                           "motivo": "aberto", "capital_saida": float(equity_curve[-1])})
 
     capital_final = equity_curve[-1]
     retorno_total = (capital_final - CAPITAL_INICIAL) / CAPITAL_INICIAL
@@ -172,6 +189,7 @@ def executar_backtest_v4(
         "calmar": calmar,
         "sharpe": sharpe,
         "equity": equity_curve if incluir_equity else None,
+        "trades": trades if incluir_trades else None,
     }
 
 

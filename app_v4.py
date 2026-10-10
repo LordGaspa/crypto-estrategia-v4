@@ -4,8 +4,9 @@
 # App novo e independente. NÃO altera nada do Código Ômega original (backend/
 # frontend), do v2, do v3, nem dos scripts de otimização/validação do v4
 # (config_v4.py, otimizador_v4.py, portfolio_v4.py, holdout_v4.py) — só LÊ os
-# CSVs que eles já geraram e reusa executar_backtest_v4 (sem modificá-lo) pra
-# desenhar os gráficos de capital.
+# CSVs que eles já geraram e reusa executar_backtest_v4 pra desenhar os gráficos
+# de capital (com `incluir_trades=True` pro diário de trades — flag só de
+# leitura, não muda nenhum número do backtest).
 #
 # O cálculo do "sinal atual" (ALTA/BAIXA) e a data desse sinal são feitos por
 # uma função local deste arquivo (estado_atual_posicao) que espelha a MESMA
@@ -29,6 +30,8 @@
 #   streamlit run app_v4.py
 
 import os
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 import altair as alt
@@ -38,6 +41,7 @@ from config_v4 import (
     CANDLES_POR_DIA,
     CAPITAL_INICIAL,
     ATIVOS_PORTFOLIO_V4,
+    DATA_CORTE_HOLDOUT,
     RECEITA_ROBUSTA,
     grupo_ouro,
     carregar_dados,
@@ -46,6 +50,7 @@ from config_v4 import (
 )
 from otimizador_v4 import executar_backtest_v4
 from estrategia_core import estado_posicao_atual
+import sombra_analise
 
 st.set_page_config(page_title="Estratégia V4 - Radar & Portfólio", layout="wide", page_icon="📡")
 alt.data_transformers.disable_max_rows()  # séries de anos em 4h passam do limite padrão (5000 linhas)
@@ -83,6 +88,24 @@ COR_BUYHOLD = "#fbbf24"
 
 # RECEITA_ROBUSTA e grupo_ouro agora vivem no config_v4 (fonte única da verdade,
 # importados acima) — antes estavam duplicados aqui.
+
+# Candles e registros vêm em UTC; o app EXIBE em horário de Brasília. Offset
+# fixo: o Brasil não tem horário de verão desde 2019.
+FUSO_BRT = pd.Timedelta(hours=-3)
+
+# O app recarrega preços da Binance se o cache tiver mais que isto (o monitor
+# horário também atualiza o cache em hh:05, então muitas vezes já está fresco).
+MAX_IDADE_PRECO_HORAS = 0.25
+
+# Acima disto de atraso no último candle, o app avisa que os dados estão velhos
+# (caso típico: Streamlit Cloud, onde a Binance bloqueia por região e só sobra
+# o cache que foi pro Git).
+LIMITE_DADOS_VELHOS_HORAS = 6
+
+
+def brt(ts):
+    """Timestamp UTC (naive) -> horário de Brasília (naive), só pra exibição."""
+    return None if ts is None or pd.isna(ts) else pd.Timestamp(ts) + FUSO_BRT
 
 # ----------------------------------------------------------------------------
 # CSS - tema escuro tipo dashboard (o base=dark já vem de .streamlit/config.toml)
@@ -285,8 +308,49 @@ def montar_df_fast(df: pd.DataFrame, params: dict) -> dict:
     return df_fast
 
 
+INTERVALO_TD = {"4h": pd.Timedelta(hours=4), "6h": pd.Timedelta(hours=6),
+                "8h": pd.Timedelta(hours=8), "12h": pd.Timedelta(hours=12),
+                "1d": pd.Timedelta(days=1)}
+
+
+@st.cache_data(ttl=300, show_spinner="Atualizando preços na Binance...")
+def atualizar_precos_ao_vivo() -> dict:
+    """Traz os 22 caches pro candle de agora (em paralelo: em série levava ~25s)
+    e mede o atraso de cada ativo. Depois disto, todo o resto do app lê o cache
+    já fresco. `versao` muda a cada atualização e invalida os caches derivados
+    (sinais, portfólio, curvas) — sem isso eles segurariam o preço velho."""
+    def _um(item):
+        ativo, itv = item
+        try:
+            df = carregar_dados(ativo, itv, max_idade_horas=MAX_IDADE_PRECO_HORAS)
+            return ativo, pd.Timestamp(df["t_abert"].iloc[-1]) if df is not None and len(df) else None
+        except Exception:
+            return ativo, None
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        ultimos = dict(pool.map(_um, ATIVOS_PORTFOLIO_V4.items()))
+
+    agora = pd.Timestamp(datetime.now(timezone.utc)).tz_localize(None)
+    atrasos = {}
+    for ativo, ult in ultimos.items():
+        if ult is None:
+            atrasos[ativo] = None
+            continue
+        # o último candle é o que está ABERTO agora: atraso real = quanto o
+        # candle esperado agora passou do último que temos
+        atrasos[ativo] = max((agora - ult - INTERVALO_TD[ATIVOS_PORTFOLIO_V4[ativo]]).total_seconds() / 3600, 0.0)
+    validos = [a for a in atrasos.values() if a is not None]
+    return {
+        "versao": agora.isoformat(timespec="seconds"),
+        "atualizado_em": agora,
+        "pior_atraso_h": max(validos) if validos else None,
+        "ultimo_candle": max((u for u in ultimos.values() if u is not None), default=None),
+        "sem_dados": [a for a, u in ultimos.items() if u is None],
+    }
+
+
 @st.cache_data(ttl=1800)
-def calcular_sinal(ativo: str, interval_str: str, params: dict) -> dict:
+def calcular_sinal(ativo: str, interval_str: str, params: dict, versao: str = "") -> dict:
     df = carregar_dados(ativo, interval_str)
     if df.empty:
         return {"posicionado": False, "preco_entrada": None, "stop_atual": None, "preco_atual": None, "preco_sinal": None, "data_mudanca": None}
@@ -295,14 +359,16 @@ def calcular_sinal(ativo: str, interval_str: str, params: dict) -> dict:
 
 
 @st.cache_data(ttl=1800)
-def curva_capital(ativo: str, interval_str: str, params: dict, taxa: float, slippage: float):
+def curva_capital(ativo: str, interval_str: str, params: dict, taxa: float, slippage: float,
+                  versao: str = ""):
     """Devolve (df_dev, df_holdout) com colunas Estrategia/Buy&Hold indexadas
     por data, cada um recomeçando em 1000 no início do seu próprio período —
-    exatamente como otimizador_v4.py e holdout_v4.py calculam oficialmente."""
+    exatamente como otimizador_v4.py e holdout_v4.py calculam oficialmente.
+    O corte é o REAL (DATA_CORTE_HOLDOUT): o holdout cresce com o tempo."""
     df = carregar_dados(ativo, interval_str)
     if df.empty:
         return None, None
-    periodos = separar_periodos(df["t_abert"])
+    periodos = separar_periodos(df["t_abert"], corte=DATA_CORTE_HOLDOUT)
     idx_dev_fim = periodos["idx_dev_fim"]
     candles_dia = CANDLES_POR_DIA[interval_str]
 
@@ -330,7 +396,7 @@ def curva_capital(ativo: str, interval_str: str, params: dict, taxa: float, slip
 
 @st.cache_data(ttl=1800)
 def curva_capital_intervalo(ativo: str, interval_str: str, params: dict, taxa: float,
-                            slippage: float, data_inicio, data_fim):
+                            slippage: float, data_inicio, data_fim, versao: str = ""):
     """Curva de capital + métricas recalculadas SOMENTE na janela [data_inicio,
     data_fim] escolhida no calendário. Os indicadores são calculados sobre o
     histórico COMPLETO (warm-up), e só a simulação/capital recomeça em 1000 no
@@ -351,7 +417,8 @@ def curva_capital_intervalo(ativo: str, interval_str: str, params: dict, taxa: f
         return None, None
     ini, fim = int(idxs[0]), int(idxs[-1]) + 1
     res = executar_backtest_v4(
-        df_fast, params, ini, fim, taxa, slippage, candles_dia, incluir_equity=True
+        df_fast, params, ini, fim, taxa, slippage, candles_dia,
+        incluir_equity=True, incluir_trades=True,
     )
     datas_janela = datas.iloc[ini:fim].reset_index(drop=True)
     eq = pd.Series(res["equity"], index=datas_janela)
@@ -359,6 +426,20 @@ def curva_capital_intervalo(ativo: str, interval_str: str, params: dict, taxa: f
     bh = pd.Series(preco / preco[0] * CAPITAL_INICIAL, index=datas_janela)
     df_curva = pd.DataFrame({"Estrategia": eq, "Buy&Hold": bh}).resample("1D").last().dropna()
     bh_ret = (preco[-1] / preco[0] - 1) * 100.0
+
+    trades = []
+    for t in res.get("trades") or []:
+        saida_dt = datas_janela.iloc[t["saida_idx"]] if t["saida_idx"] is not None else datas_janela.iloc[-1]
+        trades.append({
+            "entrada": datas_janela.iloc[t["entrada_idx"]],
+            "saida": saida_dt,
+            "preco_entrada": t["preco_entrada"],
+            "preco_saida": t["preco_saida"],
+            "motivo": t["motivo"],
+            "capital_entrada": t["capital_entrada"],
+            "capital_saida": t["capital_saida"],
+            "resultado_pct": (t["capital_saida"] / t["capital_entrada"] - 1) * 100.0,
+        })
     metricas = {
         "retorno_estrategia_%": res["retorno_total_pct"],
         "retorno_buyhold_%": round(bh_ret, 2),
@@ -367,6 +448,7 @@ def curva_capital_intervalo(ativo: str, interval_str: str, params: dict, taxa: f
         "num_trades": res["num_trades"],
         "data_ini": datas_janela.iloc[0],
         "data_fim": datas_janela.iloc[-1],
+        "trades": trades,
     }
     return df_curva, metricas
 
@@ -385,7 +467,7 @@ def _ret_diario_robusto(ativo: str, interval_str: str):
     df = carregar_dados(ativo, interval_str)
     if df is None or df.empty:
         return None
-    periodos = separar_periodos(df["t_abert"])
+    periodos = separar_periodos(df["t_abert"], corte=DATA_CORTE_HOLDOUT)
     idx = periodos["idx_dev_fim"]
     candles_dia = CANDLES_POR_DIA[interval_str]
     out = {"dev": None, "holdout": None}
@@ -429,6 +511,7 @@ def _metricas_portfolio_local(ret_por_ativo: dict, pesos: pd.Series) -> dict:
     dd = ((eq.cummax() - eq) / eq.cummax()).max()
     calmar = ra / dd if (dd and dd > 0 and ra is not None) else None
     return {
+        "eq": eq * CAPITAL_INICIAL,
         "ret_total_%": round(rt * 100, 2),
         "ret_anual_%": round(ra * 100, 2) if ra is not None else None,
         "dd_%": round(dd * 100, 2),
@@ -456,7 +539,7 @@ def _pesos_inverse_vol(ret_dev_por_ativo: dict) -> dict:
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def computar_portfolio_robusto():
+def computar_portfolio_robusto(versao: str = ""):
     """Faz UM passo por todos os 22 ativos com a receita robusta e devolve, de
     uma vez: os pesos (inverse-vol da estratégia robusta, período de dev) e as
     métricas de portfólio — DEV só veteranas (janela longa ~5 anos) e HOLDOUT
@@ -486,7 +569,46 @@ def computar_portfolio_robusto():
     }
 
 
-def grafico_area(df: pd.DataFrame, altura: int = 340, inicio_holdout=None, titulo: str = None):
+def _camada_trades(trades: list, eixo_x, eixo_y):
+    """Marcadores dos trades sobre a linha da estratégia: ▲ compra, ▼ venda
+    (verde = trade lucrativo, vermelho = prejuízo). Rótulos em inglês, como o
+    resto do gráfico."""
+    linhas = []
+    for n, t in enumerate(trades, start=1):
+        ganho = t["resultado_pct"] >= 0
+        linhas.append({"Date": t["entrada"], "When": brt(t["entrada"]), "Capital": t["capital_entrada"],
+                       "Trade": n, "Event": "Buy", "Price": t["preco_entrada"], "Result": None,
+                       "Kind": "buy"})
+        if t["motivo"] != "aberto":
+            linhas.append({"Date": t["saida"], "When": brt(t["saida"]), "Capital": t["capital_saida"], "Trade": n,
+                           "Event": "Sell (stop)" if t["motivo"] == "stop" else "Sell (crossover)",
+                           "Price": t["preco_saida"], "Result": t["resultado_pct"],
+                           "Kind": "win" if ganho else "loss"})
+    if not linhas:
+        return []
+    dados = pd.DataFrame(linhas)
+    cores = alt.Scale(domain=["buy", "win", "loss"], range=["#38bdf8", COR_ALTA, COR_BAIXA])
+    formas = alt.Scale(domain=["buy", "win", "loss"], range=["triangle-up", "triangle-down", "triangle-down"])
+    return [
+        alt.Chart(dados).mark_point(filled=True, size=70, opacity=0.95, stroke="#0b1020", strokeWidth=0.6)
+        .encode(
+            x=eixo_x, y=eixo_y,
+            color=alt.Color("Kind:N", scale=cores, legend=None),
+            shape=alt.Shape("Kind:N", scale=formas, legend=None),
+            tooltip=[
+                alt.Tooltip("Trade:Q", title="Trade #"),
+                alt.Tooltip("Event:N", title="Event"),
+                alt.Tooltip("When:T", title="Date (Brasília)", format="%d %b %Y %H:%M"),
+                alt.Tooltip("Price:Q", title="Price", format=",.6~g"),
+                alt.Tooltip("Capital:Q", title="Capital (USD)", format=",.0f"),
+                alt.Tooltip("Result:Q", title="Trade result (%)", format="+.2f"),
+            ],
+        )
+    ]
+
+
+def grafico_area(df: pd.DataFrame, altura: int = 340, inicio_holdout=None, titulo: str = None,
+                 trades: list = None):
     """Curva de capital Estratégia vs Buy&Hold.
 
     Rótulos em INGLÊS de propósito: o usuário tira print desses gráficos pra
@@ -545,6 +667,8 @@ def grafico_area(df: pd.DataFrame, altura: int = 340, inicio_holdout=None, titul
     )
 
     camadas = [area, linha, seletor, regua, pontos]
+    if trades:
+        camadas += _camada_trades(trades, eixo_x, eixo_y)
 
     if inicio_holdout is not None:
         marca = pd.DataFrame({"Date": [pd.Timestamp(inicio_holdout)]})
@@ -568,7 +692,9 @@ def grafico_area(df: pd.DataFrame, altura: int = 340, inicio_holdout=None, titul
         )
         camadas = [sombra] + camadas + [divisor, rotulo]
 
-    grafico = alt.layer(*camadas).properties(height=altura, background="transparent")
+    grafico = (alt.layer(*camadas)
+               .resolve_scale(color="independent", shape="independent")
+               .properties(height=altura, background="transparent"))
     if titulo:
         grafico = grafico.properties(title=alt.TitleParams(
             titulo, color="#e2e8f0", fontSize=13, fontWeight=600, anchor="start", offset=8))
@@ -579,6 +705,64 @@ def grafico_area(df: pd.DataFrame, altura: int = 340, inicio_holdout=None, titul
         .configure_view(strokeWidth=0)
         .configure_legend(labelColor="#e5e7eb", labelFontSize=12)
     )
+
+
+def tabela_trades(trades: list, ativo: str):
+    """Lista de todos os trades da simulação (o 'diário' do código antigo):
+    entrada, saída, motivo, duração, resultado e capital acumulado."""
+    st.markdown(f"#### 🧾 Diário de trades — {len(trades)} operações")
+    if not trades:
+        st.info("Nenhum trade nesta janela.")
+        return
+    fechados = [t for t in trades if t["motivo"] != "aberto"]
+    ganhos = [t["resultado_pct"] for t in fechados if t["resultado_pct"] >= 0]
+    perdas = [t["resultado_pct"] for t in fechados if t["resultado_pct"] < 0]
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Taxa de acerto", f"{len(ganhos) / len(fechados) * 100:.0f}%" if fechados else "—",
+              help=f"{len(ganhos)} lucrativos de {len(fechados)} fechados")
+    k2.metric("Ganho médio", f"{np.mean(ganhos):+.1f}%" if ganhos else "—")
+    k3.metric("Perda média", f"{np.mean(perdas):+.1f}%" if perdas else "—")
+    payoff = (np.mean(ganhos) / abs(np.mean(perdas))) if ganhos and perdas else None
+    k4.metric("Payoff (ganho/perda)", f"{payoff:.2f}×" if payoff else "—",
+              help="Quantas vezes o ganho médio é maior que a perda média. Estratégias de "
+                   "tendência costumam acertar menos da metade e compensar com payoff alto.")
+
+    motivos = {"stop": "🛑 Stop", "cruzamento": "↘️ Cruzamento", "aberto": "⏳ Em aberto"}
+    df_t = pd.DataFrame([{
+        "#": n,
+        "Compra": brt(t["entrada"]),
+        "Preço compra": t["preco_entrada"],
+        "Venda": None if t["motivo"] == "aberto" else brt(t["saida"]),
+        "Preço venda": t["preco_saida"],
+        "Saída por": motivos[t["motivo"]],
+        "Dias": round((t["saida"] - t["entrada"]).total_seconds() / 86400, 1),
+        "Resultado (%)": round(t["resultado_pct"], 2),
+        "Resultado ($)": round(t["capital_saida"] - t["capital_entrada"], 2),
+        "Capital ($)": round(t["capital_saida"], 2),
+    } for n, t in enumerate(trades, start=1)]).iloc[::-1]
+
+    def _cor(v):
+        return f"color: {COR_ALTA}" if v >= 0 else f"color: {COR_BAIXA}"
+
+    st.dataframe(
+        df_t.style.map(_cor, subset=["Resultado (%)", "Resultado ($)"]),
+        hide_index=True, width="stretch", height=min(420, 38 + 35 * len(df_t)),
+        column_config={
+            "Compra": st.column_config.DatetimeColumn(format="DD/MM/YYYY HH:mm"),
+            "Venda": st.column_config.DatetimeColumn(format="DD/MM/YYYY HH:mm"),
+            "Dias": st.column_config.NumberColumn(format="%.1f"),
+            "Preço compra": st.column_config.NumberColumn(format="%.6g"),
+            "Preço venda": st.column_config.NumberColumn(format="%.6g"),
+            "Resultado (%)": st.column_config.NumberColumn(format="%+.2f%%"),
+            "Resultado ($)": st.column_config.NumberColumn(format="$%+.2f"),
+            "Capital ($)": st.column_config.NumberColumn(format="$%.2f"),
+        },
+    )
+    st.caption("Mais recente no topo. Preços já incluem slippage; resultado já desconta taxa nas "
+               "duas pontas. Capital = quanto os $1000 iniciais viraram ao fim de cada trade. "
+               "Horários de Brasília.")
+    st.download_button("⬇️ Baixar diário (CSV)", df_t.iloc[::-1].to_csv(index=False).encode("utf-8-sig"),
+                       file_name=f"trades_{ativo}.csv", mime="text/csv", key=f"dl_{ativo}")
 
 
 def badge_html(texto: str, cor: str) -> str:
@@ -615,471 +799,233 @@ if df_resumo is None:
     st.error(f"Não encontrei {RESUMO_CSV}. Rode `python otimizador_v4.py` primeiro.")
     st.stop()
 
-# ---- Resumo do portfólio no topo (ESTRATÉGIA OURO ROBUSTA, calculado ao vivo) ----
-st.header("Resumo do Portfólio — Estratégia Ouro Robusta")
-st.caption(
-    "Receita robusta por grupo (veterana nas líquidas/antigas, nova nas recentes) — "
-    "não os parâmetros otimizados por ativo. Mesmos números que os sinais e gráficos abaixo."
-)
+ao_vivo = atualizar_precos_ao_vivo()
+VERSAO = ao_vivo["versao"]
+AGORA_UTC = ao_vivo["atualizado_em"]
+
+_atraso = ao_vivo["pior_atraso_h"]
+if _atraso is None or _atraso > LIMITE_DADOS_VELHOS_HORAS:
+    _ult = ao_vivo["ultimo_candle"]
+    _ult_txt = brt(_ult).strftime("%d/%m/%Y %H:%M") if _ult is not None else "—"
+    st.warning(
+        f"⚠️ **Dados desatualizados**: o candle mais recente disponível é de **{_ult_txt}** "
+        f"(Brasília). A Binance não respondeu daqui (no Streamlit Cloud isso é o bloqueio por "
+        f"região) e o app está usando o último cache salvo. **Os sinais abaixo refletem essa "
+        f"data, não agora.**"
+    )
+else:
+    st.caption(
+        f"🟢 Preços ao vivo da Binance · atualizados às {brt(AGORA_UTC).strftime('%d/%m %H:%M')} "
+        f"· todos os horários do app estão em **horário de Brasília**"
+    )
 
 with st.spinner("Calculando portfólio e pesos da estratégia robusta..."):
-    resultado_rob = computar_portfolio_robusto()
+    resultado_rob = computar_portfolio_robusto(VERSAO)
 # pesos calculados AO VIVO pela volatilidade inversa da estratégia robusta
 pesos_map = resultado_rob["weights_pct"] if resultado_rob else {}
-
-col_dev, col_holdout = st.columns(2)
-
-with col_dev:
-    st.subheader("📈 Desenvolvimento (veteranas, ~5 anos)")
-    st.caption("Janela longa e confiável das 8 líquidas/antigas. A receita foi derivada aqui — não é validação cega.")
-    m = resultado_rob["dev_vet"] if resultado_rob else None
-    m_bh = resultado_rob["dev_vet_bh"] if resultado_rob else None
-    if m is not None:
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Retorno Anualizado", f"{m['ret_anual_%']:.2f}%")
-        c2.metric("Drawdown Máximo", f"{m['dd_%']:.2f}%")
-        c3.metric("Calmar", f"{m['calmar']:.3f}")
-        bh_txt = (f" · Buy&Hold: {m_bh['ret_anual_%']:.1f}% anual, DD {m_bh['dd_%']:.1f}%, Calmar {m_bh['calmar']}"
-                  if m_bh is not None else "")
-        st.caption(f"{m['ini'].date()} a {m['fim'].date()} ({m['n_dias']} dias, {m['n_ativos']} veteranas){bh_txt}")
-    else:
-        st.info("Sem dados suficientes pra compor o portfólio de desenvolvimento.")
-
-with col_holdout:
-    st.subheader("🔒 Holdout — VALIDAÇÃO REAL (mercado de baixa)")
-    st.caption("Últimos 12 meses, nunca vistos na derivação da receita. Mede proteção de capital, não captura de alta.")
-    m = resultado_rob["hold"] if resultado_rob else None
-    m_bh = resultado_rob["hold_bh"] if resultado_rob else None
-    if m is not None and m_bh is not None:
-        c1, c2, c3 = st.columns(3)
-        c1.metric(
-            "Retorno Anualizado",
-            f"{m['ret_anual_%']:.2f}%",
-            delta=f"{m['ret_anual_%'] - m_bh['ret_anual_%']:.2f}% vs Buy&Hold",
-        )
-        c2.metric("Drawdown Máximo", f"{m['dd_%']:.2f}%")
-        c3.metric("Calmar", f"{m['calmar']:.3f}")
-        st.caption(
-            f"Buy&Hold no mesmo período: {m_bh['ret_anual_%']:.2f}% anualizado, "
-            f"DD {m_bh['dd_%']:.2f}% · {m['ini'].date()} a {m['fim'].date()} ({m['n_ativos']} ativos)"
-        )
-    else:
-        st.info("Sem dados de holdout pra compor o portfólio.")
-
-st.divider()
-
-# ---- Modo de Alocação (Regime BTC ao vivo) ----
-@st.cache_data(ttl=3600)
-def regime_btc_atual():
-    """Retorna o regime BTC atual (BULL/LATERAL/BEAR) baseado no retorno dos
-    últimos 365 dias (mesma classificação usada na Fase 1 walk-forward)."""
-    df_btc = carregar_dados("BTCUSDT", "6h")
-    if df_btc is None or df_btc.empty or len(df_btc) < 2:
-        return None, None, None
-    preco_atual = float(df_btc["fechamento"].iloc[-1])
-    data_atual  = pd.to_datetime(df_btc["t_abert"].iloc[-1])
-    data_12m    = data_atual - pd.Timedelta(days=365)
-    df_12m = df_btc[pd.to_datetime(df_btc["t_abert"]) >= data_12m]
-    if df_12m.empty:
-        return None, None, None
-    preco_12m_atras = float(df_12m["fechamento"].iloc[0])
-    ret_12m = (preco_atual / preco_12m_atras - 1) * 100
-    if ret_12m > 25:
-        regime = "BULL"
-    elif ret_12m < -25:
-        regime = "BEAR"
-    else:
-        regime = "LATERAL"
-    return regime, ret_12m, preco_atual
-
-
-regime_btc, ret_btc_12m, preco_btc = regime_btc_atual()
-resumo_filter = carregar_resumo_filter()
-
-st.subheader("🧭 Modo de Alocação — Filtro de Regime BTC")
-st.caption(
-    "Com base no retorno do BTC nos últimos 12 meses, ajuste o tamanho das suas posições. "
-    "Métricas históricas: re-backtest real com sizes dinâmicos por trade (período de desenvolvimento)."
-)
-
-if regime_btc is not None:
-    COR_BULL    = "#22c55e"
-    COR_BEAR    = "#ef4444"
-    COR_LATERAL = "#f59e0b"
-    cor_regime  = COR_BULL if regime_btc == "BULL" else (COR_BEAR if regime_btc == "BEAR" else COR_LATERAL)
-    emoji_regime= "🐂" if regime_btc == "BULL" else ("🐻" if regime_btc == "BEAR" else "↔️")
-    btc_txt     = f"BTC/USDT ${preco_btc:,.0f} · retorno 12m: {ret_btc_12m:+.1f}%"
-
-    modos_margem = carregar_modos_margem()
-
-    def _hist_str(nome_modo):
-        """Retorna string de métricas históricas do modo a partir do CSV pré-computado."""
-        if resumo_filter is None:
-            return "Execute backtest_btc_filter_v4.py para ver métricas históricas."
-        try:
-            r = resumo_filter.loc[nome_modo]
-            return (
-                f"Dev (ponderado): +{r['ret_anual_pct']:.1f}%/ano"
-                f"  ·  DD: {r['drawdown_pct']:.1f}%"
-                f"  ·  Calmar: {r['calmar']:.3f}"
-            )
-        except KeyError:
-            return ""
-
-    def _margem_html(nome_modo):
-        """Aviso de margem + número Spot-compatível. O modo Agressivo exige
-        empréstimo em ~28% do tempo — sem este aviso o card acima (que mostra
-        o retorno COM alavancagem embutida) induziria ao erro."""
-        if modos_margem is None:
-            return ""
-        try:
-            r = modos_margem.loc[nome_modo]
-        except KeyError:
-            return ""
-        if str(r["exige_margem"]).strip().lower() == "sim":
-            return (
-                f'<div style="margin-top:8px; padding:6px 9px; border-radius:7px; '
-                f'background:{COR_DSR_ALERTA}22; color:{COR_DSR_ALERTA}; '
-                f'border:1px solid {COR_DSR_ALERTA}55; font-size:0.76rem; font-weight:600;">'
-                f'⚠️ EXIGE MARGEM em {r["pct_dias_acima_100"]:.0f}% do tempo — não é Spot puro.<br>'
-                f'<span style="font-weight:500;">Limitado a 100% do capital (Spot): '
-                f'{r["cagr_spot_pct"]:.1f}%/ano, não {r["cagr_margem_pct"]:.1f}%.</span></div>'
-            )
-        return (
-            f'<div style="margin-top:8px; padding:6px 9px; border-radius:7px; '
-            f'background:#22c55e18; color:#22c55e; border:1px solid #22c55e44; '
-            f'font-size:0.76rem; font-weight:600;">'
-            f'✅ Cabe em Spot puro (exposição mediana {r["exposicao_mediana"]:.0%}, '
-            f'nunca passa de 100%).</div>'
-        )
-
-    modos = [
-        {
-            "nome": "🛡️ Defensivo",
-            "multiplicador": "1× (sem mudança)",
-            "descricao": "Sempre usa 100% dos pesos calculados. Linha de base.",
-            "ativo_em": ["BULL", "LATERAL", "BEAR"],
-            "cor": "#64748b",
-            "hist": _hist_str("DEFENSIVO"),
-            "margem": _margem_html("DEFENSIVO"),
-        },
-        {
-            "nome": "⚖️ Filtrado",
-            "multiplicador": "1× (BULL/LATERAL) · 0.5× (BEAR BTC)",
-            "descricao": "Em anos BEAR do BTC, metade do capital fica em cash.",
-            "ativo_em": ["BULL", "LATERAL", "BEAR"],
-            "cor": "#3b82f6",
-            "hist": _hist_str("FILTRADO"),
-            "margem": _margem_html("FILTRADO"),
-        },
-        {
-            "nome": "🚀 Agressivo",
-            "multiplicador": "1.5× (BULL BTC) · 1× (LATERAL) · 0.5× (BEAR BTC)",
-            "descricao": "Mais retorno em BULL, proteção em BEAR. Drawdown maior.",
-            "ativo_em": ["BULL", "LATERAL", "BEAR"],
-            "cor": "#a855f7",
-            "hist": _hist_str("AGRESSIVO"),
-            "margem": _margem_html("AGRESSIVO"),
-        },
-    ]
-
-    # Card do regime atual
-    st.markdown(
-        f'<div style="background:{cor_regime}18; border:1px solid {cor_regime}55; border-left:4px solid {cor_regime}; '
-        f'border-radius:10px; padding:10px 16px; margin-bottom:12px;">'
-        f'<span style="font-size:1.05rem; font-weight:700; color:{cor_regime};">{emoji_regime} Regime BTC atual: {regime_btc}</span>'
-        f'<br><span style="font-size:0.85rem; color:#94a3b8;">{btc_txt}</span>'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
-
-    multi_recomendado = {
-        "BULL":    {"Defensivo": "1×", "Filtrado": "1×", "Agressivo": "<b>1.5×</b> ← agora"},
-        "LATERAL": {"Defensivo": "1×", "Filtrado": "1×", "Agressivo": "1×"},
-        "BEAR":    {"Defensivo": "1×", "Filtrado": "<b>0.5×</b> ← agora", "Agressivo": "<b>0.5×</b> ← agora"},
-    }
-
-    cols_modo = st.columns(3)
-    for col, modo in zip(cols_modo, modos):
-        with col:
-            multi = multi_recomendado[regime_btc][modo["nome"].split()[-1]]
-            st.markdown(
-                f'<div style="background:{modo["cor"]}14; border:1px solid {modo["cor"]}44; '
-                f'border-radius:10px; padding:10px 14px;">'
-                f'<div style="font-weight:700; color:{modo["cor"]}; font-size:0.95rem;">{modo["nome"]}</div>'
-                f'<div style="font-size:0.78rem; color:#cbd5e1; margin-top:4px;">{modo["descricao"]}</div>'
-                f'<div style="font-size:0.78rem; color:#64748b; margin-top:6px; font-style:italic;">{modo["hist"]}</div>'
-                f'{modo.get("margem", "")}'
-                f'<div style="margin-top:8px; font-size:0.85rem; color:#f1f5f9;"><b>Agora ({regime_btc}):</b> {multi}</div>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
-
-    if modos_margem is not None:
-        st.warning(
-            "**Atenção ao modo Agressivo:** o multiplicador de 1.5× em BULL faz a exposição "
-            "agregada do portfólio passar de 100% do capital em **28% do tempo** — isso exige "
-            "margem (empréstimo), que a conta Spot da Binance não oferece. As métricas históricas "
-            "no card dele embutem essa alavancagem. Respeitando o limite de 100% do capital, o "
-            "Agressivo rende **+89,5%/ano em vez de +128,9%** — praticamente empatado com o "
-            "Defensivo (+87,4%). Custo de juros e risco de liquidação da margem **não estão "
-            "modelados em nenhum número deste app**. Ver `RELATORIO_RIQUEZA_TERMINAL.md`."
-        )
-
-    if resumo_filter is not None:
-        st.caption(
-            "📈 Re-backtest real (backtest_btc_filter_v4.py): cada trade é dimensionado pelo regime BTC "
-            "no momento da abertura — sem look-ahead. Métricas = médias ponderadas pelos pesos do portfólio, "
-            "período de desenvolvimento. Calmar = retorno anualizado / drawdown máximo."
-        )
-    else:
-        st.caption(
-            "Execute backtest_btc_filter_v4.py para ver métricas históricas reais de cada modo."
-        )
-else:
-    st.info("Não foi possível calcular o regime BTC atual (sem conexão com a API).")
-
-st.divider()
-
-# ---- Validação Multi-Regime (Fase 1) ----
-with st.expander("📊 Validação Multi-Regime — o que a estratégia faz bem (e o que não faz)", expanded=False):
-    st.caption(
-        "Análise walk-forward sobre 115 janelas anuais × 22 ativos no período de "
-        "desenvolvimento — receita robusta fixa, sem re-otimização por janela."
-    )
-
-    df_wf = carregar_csv("walkforward_robusta_v4_janelas.csv")
-    if df_wf is None:
-        st.info("Rode `python walkforward_robusta_v4.py` para gerar os dados de validação.")
-    else:
-        col_r1, col_r2, col_r3, col_r4 = st.columns(4)
-        n_total = len(df_wf)
-        pct_pos = float((df_wf["Retorno_%"] > 0).mean() * 100)
-        pct_bat = float((df_wf["Retorno_%"] > df_wf["BH_%"]).mean() * 100)
-        med = float(df_wf["Retorno_%"].median())
-        col_r1.metric("Janelas analisadas", f"{n_total}")
-        col_r2.metric("Janelas positivas", f"{pct_pos:.0f}%")
-        col_r3.metric("Bate Buy&Hold", f"{pct_bat:.0f}%")
-        col_r4.metric("Retorno mediano/janela", f"{med:+.1f}%")
-
-        st.markdown("#### Por regime de mercado (regime do ativo naquele ano)")
-        linhas_regime = []
-        for regime in ["BULL", "LATERAL", "BEAR"]:
-            sub = df_wf[df_wf["Regime"] == regime]
-            if sub.empty:
-                continue
-            rv = sub["Retorno_%"].values
-            bv = sub["BH_%"].values
-            linhas_regime.append({
-                "Regime": regime,
-                "Janelas": len(rv),
-                "Strat. mediana": f"{float(np.median(rv)):+.1f}%",
-                "B&H mediana": f"{float(np.median(bv)):+.1f}%",
-                "% positivas": f"{float(np.mean(rv > 0) * 100):.0f}%",
-                "Bate B&H": f"{float(np.mean(rv > bv) * 100):.0f}%",
-            })
-        if linhas_regime:
-            st.dataframe(
-                pd.DataFrame(linhas_regime).set_index("Regime"),
-                use_container_width=True,
-            )
-
-        st.markdown(
-            """
-**Leitura honesta:**
-- 🐻 **BEAR (queda):** estratégia perde −14% (mediana) mas **protege fortemente** vs B&H (−54%) — bate B&H em 93% das janelas.
-- ↔️ **LATERAL:** estratégia ganha +28% e bate B&H em 81% das janelas — ponto forte.
-- 🐂 **BULL (alta):** estratégia ganha +55%, mas B&H ganha +156% — saída por cruzamento corta os vencedores cedo. Principal fraqueza.
-
-**O que o trailing stop mostrou:** testado nas mesmas janelas, o trailing stop **piorou** em todos os regimes (−50pp em BULL). O cruzamento + stop ATR fixo é a saída mais eficiente para esses parâmetros.
-
-**Filtro de regime BTC (re-backtest real):** sizes dinâmicos por trade (1.5× BULL / 1× LATERAL / 0.5× BEAR BTC). Agressivo: +60.7%→+79.7%/ano, Calmar 1.158→1.316 (+14%), +6.4pp DD. Concentrado nas veteranas. Ver cards "Modo de Alocação" acima.
-
-**Vol-targeting (dimensionamento pelo ATR):** arriscar uma fração fixa R do capital por trade (em vez de 100% sempre). R=15% melhora Calmar de 1.158→1.314 (+14%) com ret/ano +61.4% — drawdown cai de 62.3% para 55.5%. Em mercados calmos, implicitamente usa mais capital; em voláteis, menos. Pode ser combinado com o filtro de regime BTC.
-
-**Slippage realista:** saídas de stop recebem slippage extra (5% do ATR para líquidas, 25% para ilíquidas). Impacto no portfólio ponderado: −3.1pp/ano, −6% no Calmar (+57.6%/ano, Calmar 1.091). A proteção em BEAR se sustenta — a estratégia sai geralmente por cruzamento (antes do crash), não por stop (em queda livre).
-            """.strip()
-        )
-
-        # Fronteira de modos — tabela comparativa
-        df_front = carregar_fronteira()
-        if df_front is not None:
-            st.markdown("#### Fronteira de modos — resumo comparativo")
-            notas = {
-                "BTC-Agressivo":    "↑↑ retorno · ↑↑ DD · leverage 1.5× em BULL BTC",
-                "Vol-target R=15%": "= retorno · ↓↓ DD · melhor Sharpe · sizing pelo ATR",
-                "BTC-Filtrado":     "↑ retorno moderado · ↓ DD · proteção em BEAR BTC sem leverage",
-                "Baseline":         "referência — 100% do capital em cada trade",
-            }
-            df_disp = df_front.copy()
-            df_disp["Ret/ano"] = df_disp["ret_anual_pct"].apply(lambda x: f"+{x:.1f}%")
-            df_disp["Drawdown"] = df_disp["drawdown_pct"].apply(lambda x: f"{x:.1f}%")
-            df_disp["Calmar"] = df_disp["calmar"].apply(lambda x: f"{x:.3f}")
-            df_disp["Sharpe"] = df_disp["sharpe"].apply(lambda x: f"{x:.3f}")
-            df_disp["Perfil"] = df_disp["Estrategia"].map(notas).fillna("")
-            st.dataframe(
-                df_disp[["Estrategia", "Ret/ano", "Drawdown", "Calmar", "Sharpe", "Perfil"]].set_index("Estrategia"),
-                use_container_width=True,
-            )
-            st.caption(
-                "Vol-target e BTC-filter testados separadamente — não existe backtest da combinação dos dois. "
-                "Período de desenvolvimento (antes do holdout lacrado), médias ponderadas pelos 22 ativos. "
-                "BTC-Agressivo e Vol-target R=15% têm Calmar quase idêntico mas perfis opostos: "
-                "um dá mais retorno com mais DD, o outro dá o mesmo retorno com menos DD."
-            )
-
-        # Gráfico de distribuição
-        st.markdown("#### Distribuição dos retornos anuais (estratégia vs B&H)")
-        df_dist = df_wf[["Retorno_%", "BH_%"]].copy()
-        # rótulos em inglês, mesmo padrão dos gráficos de capital (o usuário
-        # tira print destes gráficos pra publicar)
-        df_dist = df_dist.rename(columns={"Retorno_%": "Strategy", "BH_%": "Buy & Hold"})
-        df_melt = df_dist.melt(var_name="Series", value_name="Return")
-        if not df_melt.empty:
-            hist = (
-                alt.Chart(df_melt)
-                .mark_bar(opacity=0.65, binSpacing=1)
-                .encode(
-                    x=alt.X("Return:Q", bin=alt.Bin(maxbins=40), title="Annual return (%)"),
-                    y=alt.Y("count():Q", title="Asset-year windows"),
-                    color=alt.Color(
-                        "Series:N",
-                        scale=alt.Scale(domain=["Strategy", "Buy & Hold"], range=[COR_ESTRATEGIA, COR_BUYHOLD]),
-                        legend=alt.Legend(title=None, orient="top"),
-                    ),
-                    tooltip=[
-                        alt.Tooltip("Series:N", title="Series"),
-                        alt.Tooltip("count():Q", title="Windows"),
-                    ],
-                )
-                .properties(height=230, background="transparent",
-                            title=alt.TitleParams("Annual return distribution — 115 asset-year windows",
-                                                   color="#e2e8f0", fontSize=13, fontWeight=600,
-                                                   anchor="start", offset=8))
-                .configure_axis(gridColor="#262d3d", labelColor="#9aa4b8", titleColor="#9aa4b8")
-                .configure_view(strokeWidth=0)
-                .configure_legend(labelColor="#e5e7eb", labelFontSize=12)
-            )
-            st.altair_chart(hist, use_container_width=True)
-
-st.divider()
-
-# ---- Radar de sinais ----
-st.header("Radar de Sinais (22 ativos)")
-st.caption(
-    "🟢 ALTA = posicionado agora · 🔴 BAIXA = fora do mercado · ordenado pela data do último "
-    "cruzamento que gerou o sinal atual (mais recente primeiro). O selo de significância em cada "
-    "card vem do **bootstrap do Sharpe da receita robusta** (a estratégia que gera estes sinais), "
-    "não do DSR dos parâmetros otimizados — que o app não usa."
-)
+# significância medida sobre a receita que realmente roda (ver BOOTSTRAP_CSV)
+boot_df = carregar_bootstrap()
 
 if "ativo_selecionado" not in st.session_state:
     st.session_state["ativo_selecionado"] = None
 
-# significância medida sobre a receita que realmente roda (ver BOOTSTRAP_CSV)
-boot_df = carregar_bootstrap()
 
-# pré-computa sinal de todos os ativos pra poder ordenar os cards por data.
-# Os sinais usam a RECEITA OURO ROBUSTA do grupo do ativo (veterana/nova) — NÃO
-# os parâmetros otimizados por ativo, que decidimos não confiar (overfitting).
-cartoes = []
-for _, row in df_resumo.iterrows():
-    ativo = row["Ativo"]
-    params = RECEITA_ROBUSTA[grupo_ouro(ativo)]
-    sinal = calcular_sinal(ativo, row["Interval"], params)
-    cartoes.append({"row": row, "params": params, "sinal": sinal})
+@st.cache_data(ttl=300, show_spinner=False)
+def carregar_sombra(versao: str = ""):
+    try:
+        return sombra_analise.resumo()
+    except Exception as e:  # arquivo sendo regravado pela tarefa horária etc.
+        return {"erro": str(e)}
 
-cartoes.sort(key=lambda c: c["sinal"]["data_mudanca"] or pd.Timestamp.min, reverse=True)
 
-N_COLS = 4
-blocos = [cartoes[i : i + N_COLS] for i in range(0, len(cartoes), N_COLS)]
+def _fmt_dt(ts, com_hora=True):
+    """Com hora: converte UTC -> Brasília. Só data (séries diárias): não desloca,
+    senão um dia que começa 00:00 UTC apareceria como o dia anterior."""
+    if ts is None or pd.isna(ts):
+        return "—"
+    return brt(ts).strftime("%d/%m/%Y %H:%M") if com_hora else pd.Timestamp(ts).strftime("%d/%m/%Y")
 
-for bloco in blocos:
-    cols = st.columns(N_COLS)
-    for col, item in zip(cols, bloco):
-        row, params, sinal = item["row"], item["params"], item["sinal"]
+
+def _cor_resultado(v):
+    if v is None or pd.isna(v):
+        return ""
+    return f"color: {COR_ALTA}" if v >= 0 else f"color: {COR_BAIXA}"
+
+
+# ============================================================================
+# 📡 RADAR
+# ============================================================================
+def secao_radar():
+    st.header("Radar de Sinais (22 ativos)")
+    st.caption(
+        "🟢 ALTA = posicionado agora · 🔴 BAIXA = fora do mercado. O selo de significância em cada "
+        "card vem do **bootstrap do Sharpe da receita robusta** (a estratégia que gera estes sinais), "
+        "não do DSR dos parâmetros otimizados, que o app não usa."
+    )
+
+    # Os sinais usam a RECEITA OURO ROBUSTA do grupo do ativo (veterana/nova) —
+    # NÃO os parâmetros otimizados por ativo (overfitting).
+    cartoes = []
+    for _, row in df_resumo.iterrows():
         ativo = row["Ativo"]
-        with col:
-            with st.container(border=True):
-                posicionado = sinal["posicionado"]
-                cor_sinal = COR_ALTA if posicionado else COR_BAIXA
-                texto_sinal = "🟢 ALTA" if posicionado else "🔴 BAIXA"
-                data_txt = sinal["data_mudanca"].strftime("%d/%m/%Y") if sinal["data_mudanca"] is not None else "sem sinal no histórico"
+        params = RECEITA_ROBUSTA[grupo_ouro(ativo)]
+        sinal = calcular_sinal(ativo, row["Interval"], params, VERSAO)
+        var = None
+        if sinal["preco_sinal"] and sinal["preco_atual"] is not None:
+            var = (sinal["preco_atual"] / sinal["preco_sinal"] - 1) * 100
+        dist_stop = None
+        if sinal["posicionado"] and sinal["stop_atual"] is not None and sinal["preco_atual"]:
+            dist_stop = (sinal["preco_atual"] / sinal["stop_atual"] - 1) * 100
+        dm = sinal["data_mudanca"]
+        novo = dm is not None and (AGORA_UTC - dm) <= pd.Timedelta(hours=48)
+        cartoes.append({"row": row, "params": params, "sinal": sinal, "var": var,
+                        "dist_stop": dist_stop, "novo": novo,
+                        "veterana": row["Grupo_Liquidez"] == "liquido",
+                        "peso": pesos_map.get(ativo)})
 
-                variacao_pct = None
-                if sinal["preco_sinal"] and sinal["preco_atual"] is not None:
-                    variacao_pct = (sinal["preco_atual"] / sinal["preco_sinal"] - 1) * 100
-                variacao_chip = ""
-                if variacao_pct is not None:
-                    cor_variacao = COR_ALTA if variacao_pct >= 0 else COR_BAIXA
-                    variacao_chip = f'<span class="variacao-chip" style="background:{cor_variacao}22; color:{cor_variacao}; border:1px solid {cor_variacao}55;">{variacao_pct:+.2f}%</span>'
+    n_alta = sum(c["sinal"]["posicionado"] for c in cartoes)
+    n_novos = sum(c["novo"] for c in cartoes)
+    st.markdown(
+        f"**🟢 {n_alta} em ALTA · 🔴 {len(cartoes) - n_alta} em BAIXA · 🆕 {n_novos} "
+        f"sinal{'is' if n_novos != 1 else ''} nas últimas 48h**"
+    )
 
-                preco_txt = formatar_preco(sinal["preco_atual"]) if sinal["preco_atual"] is not None else "—"
+    f1, f2, f3, f4 = st.columns([1.25, 1.35, 0.9, 1.5])
+    with f1:
+        f_sinal = st.segmented_control("Sinal", ["Todos", "🟢 ALTA", "🔴 BAIXA"],
+                                       default="Todos", key="f_sinal") or "Todos"
+    with f2:
+        f_grupo = st.segmented_control("Grupo", ["Todos", "💧 Veteranas", "🪙 Novas"],
+                                       default="Todos", key="f_grupo") or "Todos"
+    with f3:
+        st.write("")
+        f_novos = st.toggle("🆕 Só sinais novos (48h)", key="f_novos")
+    with f4:
+        f_ordem = st.selectbox("Ordenar por", [
+            "Data do sinal (mais recente primeiro)",
+            "Variação desde o sinal (maior primeiro)",
+            "Peso no portfólio (maior primeiro)",
+            "Distância do stop (mais perto primeiro)",
+        ], key="f_ordem")
 
-                stop_html = ""
-                if posicionado and sinal["stop_atual"] is not None and sinal["preco_atual"]:
-                    distancia_pct = abs(sinal["stop_atual"] / sinal["preco_atual"] - 1) * 100
-                    stop_html = (
-                        f'<div class="stop-row">🛑 <b>Stop fixo desde a entrada:</b> {formatar_preco(sinal["stop_atual"])} '
-                        f'<span style="color:#94a3b8;">(faltam {distancia_pct:.2f}% de queda a partir de agora pra atingi-lo)</span></div>'
-                    )
+    vis = cartoes
+    if f_sinal == "🟢 ALTA":
+        vis = [c for c in vis if c["sinal"]["posicionado"]]
+    elif f_sinal == "🔴 BAIXA":
+        vis = [c for c in vis if not c["sinal"]["posicionado"]]
+    if f_grupo == "💧 Veteranas":
+        vis = [c for c in vis if c["veterana"]]
+    elif f_grupo == "🪙 Novas":
+        vis = [c for c in vis if not c["veterana"]]
+    if f_novos:
+        vis = [c for c in vis if c["novo"]]
 
-                grupo_liquido = row["Grupo_Liquidez"] == "liquido"
-                cor_grupo = COR_LIQUIDO if grupo_liquido else COR_MENOS_LIQUIDO
-                texto_grupo = "💧 Veterana" if grupo_liquido else "🪙 Nova"
-                peso = pesos_map.get(ativo)
+    menos_inf = float("-inf")
+    if f_ordem.startswith("Variação"):
+        vis = sorted(vis, key=lambda c: c["var"] if c["var"] is not None else menos_inf, reverse=True)
+    elif f_ordem.startswith("Peso"):
+        vis = sorted(vis, key=lambda c: c["peso"] if c["peso"] is not None else menos_inf, reverse=True)
+    elif f_ordem.startswith("Distância"):
+        vis = sorted(vis, key=lambda c: c["dist_stop"] if c["dist_stop"] is not None else float("inf"))
+    else:
+        vis = sorted(vis, key=lambda c: c["sinal"]["data_mudanca"] or pd.Timestamp.min, reverse=True)
 
-                html = f"""
-                <div class="sinal-card" style="background:{cor_sinal}14; border:1px solid {cor_sinal}40; border-left:4px solid {cor_sinal};">
-                    <div style="display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:4px 8px;">
-                        <span style="font-size:1.05rem; font-weight:700; color:#f1f5f9; overflow-wrap:anywhere;">{ativo}</span>
-                        {badge_html(texto_sinal, cor_sinal)}
-                    </div>
-                    <div style="margin-top:8px;">
-                        <span class="preco-atual">{preco_txt}</span>{variacao_chip}
-                    </div>
-                    <div class="meta-sinal">sinal desde {data_txt} · preço no sinal: {formatar_preco(sinal["preco_sinal"]) if sinal["preco_sinal"] else "—"}</div>
-                    {stop_html}
-                    <div style="margin-top:8px;">
-                        {chip_html(texto_grupo, cor_grupo)}
-                        {chip_html(f"peso {peso:.2f}%" if peso is not None else "peso n/d", "#64748b")}
-                    </div>
+    if not vis:
+        st.info("Nenhum ativo com esses filtros.")
+
+    N_COLS = 4
+    for i in range(0, len(vis), N_COLS):
+        cols = st.columns(N_COLS)
+        for col, item in zip(cols, vis[i: i + N_COLS]):
+            with col:
+                _card(item)
+
+    st.divider()
+    secao_detalhe()
+
+
+def _card(item):
+    row, sinal = item["row"], item["sinal"]
+    ativo = row["Ativo"]
+    with st.container(border=True):
+        posicionado = sinal["posicionado"]
+        cor_sinal = COR_ALTA if posicionado else COR_BAIXA
+        texto_sinal = "🟢 ALTA" if posicionado else "🔴 BAIXA"
+        data_txt = (_fmt_dt(sinal["data_mudanca"]) if sinal["data_mudanca"] is not None
+                    else "sem sinal no histórico")
+
+        variacao_chip = ""
+        if item["var"] is not None:
+            cv = COR_ALTA if item["var"] >= 0 else COR_BAIXA
+            variacao_chip = (f'<span class="variacao-chip" style="background:{cv}22; color:{cv}; '
+                             f'border:1px solid {cv}55;">{item["var"]:+.2f}%</span>')
+        novo_chip = (f'<span class="variacao-chip" style="background:#38bdf822; color:#38bdf8; '
+                     f'border:1px solid #38bdf855;">🆕 NOVO</span>') if item["novo"] else ""
+
+        preco_txt = formatar_preco(sinal["preco_atual"]) if sinal["preco_atual"] is not None else "—"
+
+        stop_html = ""
+        if item["dist_stop"] is not None:
+            stop_html = (
+                f'<div class="stop-row">🛑 <b>Stop fixo desde a entrada:</b> {formatar_preco(sinal["stop_atual"])} '
+                f'<span style="color:#94a3b8;">(faltam {abs(sinal["stop_atual"] / sinal["preco_atual"] - 1) * 100:.2f}% '
+                f'de queda a partir de agora pra atingi-lo)</span></div>'
+            )
+
+        cor_grupo = COR_LIQUIDO if item["veterana"] else COR_MENOS_LIQUIDO
+        texto_grupo = "💧 Veterana" if item["veterana"] else "🪙 Nova"
+        peso = item["peso"]
+
+        html = f"""
+        <div class="sinal-card" style="background:{cor_sinal}14; border:1px solid {cor_sinal}40; border-left:4px solid {cor_sinal};">
+            <div style="display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:4px 8px;">
+                <span style="font-size:1.05rem; font-weight:700; color:#f1f5f9; overflow-wrap:anywhere;">{ativo}</span>
+                {badge_html(texto_sinal, cor_sinal)}
+            </div>
+            <div style="margin-top:8px;">
+                <span class="preco-atual">{preco_txt}</span>{variacao_chip}{novo_chip}
+            </div>
+            <div class="meta-sinal">sinal desde {data_txt} · preço no sinal: {formatar_preco(sinal["preco_sinal"]) if sinal["preco_sinal"] else "—"}</div>
+            {stop_html}
+            <div style="margin-top:8px;">
+                {chip_html(texto_grupo, cor_grupo)}
+                {chip_html(f"peso {peso:.2f}%" if peso is not None else "peso n/d", "#64748b")}
+            </div>
+        """
+        sig = _avaliar_significancia(boot_df, ativo)
+        if sig is not None:
+            if sig["estado"] == "confirmado":
+                html += f"""
+                <div class="dsr-aviso" style="background:{COR_ALTA}18; color:{COR_ALTA}; border:1px solid {COR_ALTA}44;">
+                    ✅ Edge confirmado no histórico — Sharpe {sig['sharpe']:+.2f}, p={sig['p']:.3f} ({sig['n_janelas']} janelas anuais)
+                </div>
                 """
-                sig = _avaliar_significancia(boot_df, ativo)
-                if sig is not None:
-                    if sig["estado"] == "confirmado":
-                        html += f"""
-                        <div class="dsr-aviso" style="background:{COR_ALTA}18; color:{COR_ALTA}; border:1px solid {COR_ALTA}44;">
-                            ✅ Edge confirmado no histórico — Sharpe {sig['sharpe']:+.2f}, p={sig['p']:.3f} ({sig['n_janelas']} janelas anuais)
-                        </div>
-                        """
-                    elif sig["estado"] == "amostra_curta":
-                        html += f"""
-                        <div class="dsr-aviso" style="background:{COR_DSR_ALERTA}22; color:{COR_DSR_ALERTA}; border:1px solid {COR_DSR_ALERTA}55;">
-                            ⚠️ Histórico curto ({sig['n_janelas']} janela{'s' if sig['n_janelas'] != 1 else ''} anual) — sem dados suficientes pra confirmar ou descartar o edge
-                        </div>
-                        """
-                    else:
-                        html += f"""
-                        <div class="dsr-aviso" style="background:{COR_DSR_ALERTA}22; color:{COR_DSR_ALERTA}; border:1px solid {COR_DSR_ALERTA}55;">
-                            ⚠️ Edge não confirmado — p={sig['p']:.3f} (acima de 0,05) em {sig['n_janelas']} janelas; tratar com cautela
-                        </div>
-                        """
-                html += "</div>"
-                html = "\n".join(linha.strip() for linha in html.strip().splitlines())
-                st.markdown(html, unsafe_allow_html=True)
+            elif sig["estado"] == "amostra_curta":
+                html += f"""
+                <div class="dsr-aviso" style="background:{COR_DSR_ALERTA}22; color:{COR_DSR_ALERTA}; border:1px solid {COR_DSR_ALERTA}55;">
+                    ⚠️ Histórico curto ({sig['n_janelas']} janela{'s' if sig['n_janelas'] != 1 else ''} anual) — sem dados suficientes pra confirmar ou descartar o edge
+                </div>
+                """
+            else:
+                html += f"""
+                <div class="dsr-aviso" style="background:{COR_DSR_ALERTA}22; color:{COR_DSR_ALERTA}; border:1px solid {COR_DSR_ALERTA}55;">
+                    ⚠️ Edge não confirmado — p={sig['p']:.3f} (acima de 0,05) em {sig['n_janelas']} janelas; tratar com cautela
+                </div>
+                """
+        html += "</div>"
+        html = "\n".join(linha.strip() for linha in html.strip().splitlines())
+        st.markdown(html, unsafe_allow_html=True)
 
-                if st.button("Ver detalhes", key=f"btn_{ativo}", use_container_width=True):
-                    st.session_state["ativo_selecionado"] = ativo
+        if st.button("Ver detalhes", key=f"btn_{ativo}", width="stretch"):
+            st.session_state["ativo_selecionado"] = ativo
 
-st.divider()
 
-# ---- Análise detalhada por ativo ----
-st.header("Análise Detalhada por Ativo")
-ativo_sel = st.session_state["ativo_selecionado"]
-if ativo_sel is None:
-    st.info("Clique em \"Ver detalhes\" em algum card acima pra ver o gráfico de capital.")
-else:
+def secao_detalhe():
+    st.header("Análise Detalhada por Ativo")
+    ativo_sel = st.session_state["ativo_selecionado"]
+    if ativo_sel is None:
+        st.info("Clique em \"Ver detalhes\" em algum card acima pra ver o gráfico de capital e o diário de trades.")
+        return
     row = df_resumo[df_resumo["Ativo"] == ativo_sel].iloc[0]
     info_liq = classificar_liquidez(ativo_sel)
     interval_sel = row["Interval"]
@@ -1120,77 +1066,72 @@ else:
     )
 
     # ---- Gráfico principal: histórico completo, com holdout demarcado ----
-    # (antes o padrão era abrir no holdout, o que deixava este gráfico IDÊNTICO
-    #  ao "holdout oficial" logo abaixo — duplicação sem motivo. Abrindo no
-    #  histórico inteiro, os dois passam a mostrar coisas diferentes.)
     st.markdown("### 📈 Evolução do capital")
     df_datas = carregar_dados(ativo_sel, interval_sel)
     if df_datas is None or df_datas.empty:
         st.info("Sem dados de preço pra este ativo.")
-    else:
-        datas_all = pd.to_datetime(df_datas["t_abert"])
-        dmin, dmax = datas_all.min().date(), datas_all.max().date()
-        periodos_a = separar_periodos(datas_all)
-        inicio_hold = (periodos_a["holdout_inicio"].date()
-                       if periodos_a["holdout_inicio"] is not None else None)
+        return
+    datas_all = pd.to_datetime(df_datas["t_abert"])
+    dmin, dmax = datas_all.min().date(), datas_all.max().date()
+    periodos_a = separar_periodos(datas_all, corte=DATA_CORTE_HOLDOUT)
+    inicio_hold = (periodos_a["holdout_inicio"].date()
+                   if periodos_a["holdout_inicio"] is not None else None)
 
-        colcal1, colcal2 = st.columns([2, 1])
-        with colcal1:
-            intervalo = st.date_input(
-                "Período exibido",
-                value=(dmin, dmax),
-                min_value=dmin,
-                max_value=dmax,
-                key=f"cal_{ativo_sel}",
-                format="DD/MM/YYYY",
-            )
-        with colcal2:
-            st.caption("Padrão = histórico completo. A faixa sombreada à direita é o "
-                       "holdout (12 meses fora da amostra). Arraste as datas pra "
-                       "recalcular em qualquer janela.")
+    colcal1, colcal2 = st.columns([2, 1])
+    with colcal1:
+        intervalo = st.date_input(
+            "Período exibido", value=(dmin, dmax), min_value=dmin, max_value=dmax,
+            key=f"cal_{ativo_sel}", format="DD/MM/YYYY",
+        )
+    with colcal2:
+        st.caption(f"Padrão = histórico completo. A faixa sombreada à direita é o holdout (desde "
+                   f"{DATA_CORTE_HOLDOUT:%d/%m/%Y}, nunca visto na criação da receita). Arraste as "
+                   f"datas pra recalcular em qualquer janela.")
 
-        if isinstance(intervalo, (list, tuple)) and len(intervalo) == 2:
-            data_ini, data_fim = intervalo
-            with st.spinner("Recalculando na janela escolhida..."):
-                df_janela, met = curva_capital_intervalo(
-                    ativo_sel, interval_sel, params, info_liq["taxa"], info_liq["slippage"],
-                    data_ini, data_fim,
-                )
-            if df_janela is None or met is None:
-                st.warning("Janela muito curta pra simular (precisa de pelo menos ~10 candles). Escolha um período maior.")
-            else:
-                m1, m2, m3, m4 = st.columns(4)
-                delta_vs_bh = met["retorno_estrategia_%"] - met["retorno_buyhold_%"]
-                m1.metric("Estratégia (janela)", f"{met['retorno_estrategia_%']:.2f}%",
-                          delta=f"{delta_vs_bh:+.2f}% vs Buy&Hold")
-                m2.metric("Buy & Hold (janela)", f"{met['retorno_buyhold_%']:.2f}%")
-                m3.metric("Drawdown máx", f"{met['dd_%']:.2f}%")
-                m4.metric("Trades", f"{int(met['num_trades'])}")
-                calmar_txt = f"{met['calmar']:.2f}" if met["calmar"] is not None else "—"
-                st.caption(
-                    f"Janela: {met['data_ini'].strftime('%d/%m/%Y')} a {met['data_fim'].strftime('%d/%m/%Y')} "
-                    f"· Calmar {calmar_txt} · indicadores aquecidos com o histórico anterior à janela "
-                    f"(capital recomeça em ${CAPITAL_INICIAL:.0f} no início do período escolhido)."
-                )
-                # só marca o holdout se ele estiver DENTRO da janela exibida
-                marca_hold = None
-                if inicio_hold is not None and data_ini < inicio_hold < data_fim:
-                    marca_hold = inicio_hold
-                st.altair_chart(
-                    grafico_area(
-                        df_janela, altura=380, inicio_holdout=marca_hold,
-                        titulo=f"{ativo_sel} · {interval_sel} — Strategy vs Buy & Hold",
-                    ),
-                    use_container_width=True,
-                )
-        else:
-            st.info("Escolha as duas datas (início e fim) no calendário acima.")
+    if not (isinstance(intervalo, (list, tuple)) and len(intervalo) == 2):
+        st.info("Escolha as duas datas (início e fim) no calendário acima.")
+        return
+    data_ini, data_fim = intervalo
+    with st.spinner("Recalculando na janela escolhida..."):
+        df_janela, met = curva_capital_intervalo(
+            ativo_sel, interval_sel, params, info_liq["taxa"], info_liq["slippage"],
+            data_ini, data_fim, VERSAO,
+        )
+    if df_janela is None or met is None:
+        st.warning("Janela muito curta pra simular (precisa de pelo menos ~10 candles). Escolha um período maior.")
+        return
+
+    m1, m2, m3, m4 = st.columns(4)
+    delta_vs_bh = met["retorno_estrategia_%"] - met["retorno_buyhold_%"]
+    m1.metric("Estratégia (janela)", f"{met['retorno_estrategia_%']:.2f}%",
+              delta=f"{delta_vs_bh:+.2f}% vs Buy&Hold")
+    m2.metric("Buy & Hold (janela)", f"{met['retorno_buyhold_%']:.2f}%")
+    m3.metric("Drawdown máx", f"{met['dd_%']:.2f}%")
+    m4.metric("Trades", f"{int(met['num_trades'])}")
+    calmar_txt = f"{met['calmar']:.2f}" if met["calmar"] is not None else "—"
+    st.caption(
+        f"Janela: {_fmt_dt(met['data_ini'], False)} a {_fmt_dt(met['data_fim'], False)} "
+        f"· Calmar {calmar_txt} · indicadores aquecidos com o histórico anterior à janela "
+        f"(capital recomeça em ${CAPITAL_INICIAL:.0f} no início do período escolhido)."
+    )
+    marca_hold = inicio_hold if (inicio_hold is not None and data_ini < inicio_hold < data_fim) else None
+    trades_janela = met.get("trades") or []
+    mostrar_trades = st.toggle(
+        f"Marcar os {len(trades_janela)} trades no gráfico (▲ compra · ▼ venda)",
+        value=True, key=f"tog_trades_{ativo_sel}",
+    )
+    st.altair_chart(
+        grafico_area(
+            df_janela, altura=380, inicio_holdout=marca_hold,
+            titulo=f"{ativo_sel} · {interval_sel} — Strategy vs Buy & Hold",
+            trades=trades_janela if mostrar_trades else None,
+        ),
+        width="stretch",
+    )
+    tabela_trades(trades_janela, ativo_sel)
+    _sombra_do_ativo(ativo_sel)
 
     # ---- Janelas oficiais fixas (dev | holdout), pra referência ----
-    # Recolhidas num expander: metodologia DIFERENTE do gráfico acima (cada
-    # período recomeça em 1000 e calcula indicadores isoladamente, sem aquecer
-    # com o histórico anterior). São os números oficiais de validação — ficam
-    # disponíveis, mas sem competir visualmente com o gráfico principal.
     with st.expander("🔬 Janelas oficiais de validação (metodologia isolada)", expanded=False):
         st.caption(
             "Diferente do gráfico acima: aqui cada período é simulado do zero (capital recomeça "
@@ -1199,24 +1140,576 @@ else:
             "diferir um pouco do gráfico principal."
         )
         with st.spinner("Reconstruindo curvas de capital..."):
-            df_dev, df_holdout = curva_capital(ativo_sel, interval_sel, params, info_liq["taxa"], info_liq["slippage"])
-
+            df_dev, df_holdout = curva_capital(ativo_sel, interval_sel, params, info_liq["taxa"],
+                                               info_liq["slippage"], VERSAO)
         col_g1, col_g2 = st.columns(2)
         with col_g1:
-            st.markdown("**Desenvolvimento** — onde a receita foi derivada")
+            st.markdown(f"**Desenvolvimento** — até {DATA_CORTE_HOLDOUT:%d/%m/%Y}, onde a receita foi derivada")
             if df_dev is not None:
-                st.altair_chart(
-                    grafico_area(df_dev, altura=260, titulo="Development period"),
-                    use_container_width=True,
-                )
+                st.altair_chart(grafico_area(df_dev, altura=260, titulo="Development period"),
+                                width="stretch")
             else:
                 st.info("Sem dados suficientes de desenvolvimento pra este ativo.")
         with col_g2:
-            st.markdown("**Holdout** 🔒 — 12 meses nunca vistos na derivação")
+            st.markdown(f"**Holdout** 🔒 — desde {DATA_CORTE_HOLDOUT:%d/%m/%Y}, nunca visto na derivação")
             if df_holdout is not None:
-                st.altair_chart(
-                    grafico_area(df_holdout, altura=260, titulo="Holdout (out-of-sample)"),
-                    use_container_width=True,
-                )
+                st.altair_chart(grafico_area(df_holdout, altura=260, titulo="Holdout (out-of-sample)"),
+                                width="stretch")
             else:
                 st.info("Sem dados de holdout pra este ativo ainda.")
+
+
+def _sombra_do_ativo(ativo):
+    """O que a Sombra (Fase 4) fez de verdade neste ativo, ao lado do que o
+    backtest assumiu."""
+    r = carregar_sombra(VERSAO)
+    if not r or "erro" in r:
+        return
+    fech = [t for t in r["fechados"] if t["ativo"] == ativo]
+    abertos = [t for t in r["abertos"] if t["ativo"] == ativo]
+    if not fech and not abertos:
+        return
+    st.markdown(f"#### 🕶️ Sombra neste ativo — {len(fech)} fechado(s), {len(abertos)} aberto(s)")
+    linhas = [{
+        "Compra": brt(t["compra"]), "Venda": brt(t["venda"]),
+        "Sombra (%)": round(t["resultado_pct"], 2),
+        "Backtest (%)": round(t["resultado_bt_pct"], 2),
+        "Diferença (pp)": round(t["resultado_pct"] - t["resultado_bt_pct"], 2),
+        "Resultado ($)": round(t["resultado_usd"], 2),
+    } for t in fech] + [{
+        "Compra": brt(t["compra"]), "Venda": None,
+        "Sombra (%)": round(t["resultado_pct"], 2), "Backtest (%)": None,
+        "Diferença (pp)": None, "Resultado ($)": round(t["resultado_usd"], 2),
+    } for t in abertos]
+    df = pd.DataFrame(linhas)
+    st.dataframe(
+        df.style.map(_cor_resultado, subset=["Sombra (%)", "Backtest (%)", "Resultado ($)"]),
+        hide_index=True, width="stretch",
+        column_config={
+            "Compra": st.column_config.DatetimeColumn(format="DD/MM/YYYY HH:mm"),
+            "Venda": st.column_config.DatetimeColumn(format="DD/MM/YYYY HH:mm"),
+            "Sombra (%)": st.column_config.NumberColumn(format="%+.2f%%"),
+            "Backtest (%)": st.column_config.NumberColumn(format="%+.2f%%"),
+            "Diferença (pp)": st.column_config.NumberColumn(format="%+.2f"),
+            "Resultado ($)": st.column_config.NumberColumn(format="$%+.2f"),
+        },
+    )
+    st.caption("Sombra = preço real no instante em que o robô decidiria. Backtest = abertura do candle "
+               "do sinal (o que a simulação assume). Venda vazia = posição ainda aberta.")
+
+
+# ============================================================================
+# 📊 PORTFÓLIO
+# ============================================================================
+def _rotulo_mercado(bh_anual):
+    if bh_anual is None:
+        return ""
+    if bh_anual < -20:
+        return "de baixa"
+    if bh_anual > 20:
+        return "de alta"
+    return "lateral"
+
+
+def _grafico_portfolio(m, m_bh, titulo):
+    if m is None or m_bh is None:
+        return
+    df = pd.concat({"Estrategia": m["eq"], "Buy&Hold": m_bh["eq"]}, axis=1).dropna()
+    if len(df) > 5:
+        st.altair_chart(grafico_area(df, altura=240, titulo=titulo), width="stretch")
+
+
+def secao_portfolio():
+    st.header("Resumo do Portfólio — Estratégia Ouro Robusta")
+    st.caption(
+        "Receita robusta por grupo (veterana nas líquidas/antigas, nova nas recentes), pesos por "
+        "volatilidade inversa. Curvas partindo de $1000, carteira inteira contra o Buy & Hold dos "
+        "mesmos ativos com os mesmos pesos."
+    )
+    col_dev, col_holdout = st.columns(2)
+
+    with col_dev:
+        m = resultado_rob["dev_vet"] if resultado_rob else None
+        m_bh = resultado_rob["dev_vet_bh"] if resultado_rob else None
+        anos = (m["fim"] - m["ini"]).days / 365.25 if m is not None else None
+        st.subheader(f"📈 Desenvolvimento (veteranas, {anos:.1f} anos)" if anos else "📈 Desenvolvimento")
+        st.caption(f"Até {DATA_CORTE_HOLDOUT:%d/%m/%Y}, só as 8 líquidas/antigas (janela longa e "
+                   f"confiável). A receita foi derivada aqui: não é validação cega.")
+        if m is not None:
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Retorno Anualizado", f"{m['ret_anual_%']:.2f}%")
+            c2.metric("Drawdown Máximo", f"{m['dd_%']:.2f}%")
+            c3.metric("Calmar", f"{m['calmar']:.3f}")
+            bh_txt = (f" · Buy&Hold: {m_bh['ret_anual_%']:.1f}% anual, DD {m_bh['dd_%']:.1f}%, Calmar {m_bh['calmar']}"
+                      if m_bh is not None else "")
+            st.caption(f"{_fmt_dt(m['ini'], False)} a {_fmt_dt(m['fim'], False)} ({m['n_dias']} dias, "
+                       f"{m['n_ativos']} veteranas){bh_txt}")
+            _grafico_portfolio(m, m_bh, "Portfolio — development (8 veterans)")
+        else:
+            st.info("Sem dados suficientes pra compor o portfólio de desenvolvimento.")
+
+    with col_holdout:
+        m = resultado_rob["hold"] if resultado_rob else None
+        m_bh = resultado_rob["hold_bh"] if resultado_rob else None
+        st.subheader("🔒 Holdout — VALIDAÇÃO REAL")
+        if m is not None and m_bh is not None:
+            meses = (m["fim"] - DATA_CORTE_HOLDOUT).days / 30.44
+            mercado = _rotulo_mercado(m_bh["ret_anual_%"])
+            st.caption(
+                f"Desde {DATA_CORTE_HOLDOUT:%d/%m/%Y} ({meses:.0f} meses, e crescendo): nada disso foi "
+                f"visto na criação da receita. Mercado no período: **{mercado}** (Buy & Hold "
+                f"{m_bh['ret_anual_%']:+.0f}%/ano)"
+                + (". Aqui o que se mede é proteção de capital, não captura de alta." if mercado == "de baixa" else ".")
+            )
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Retorno Anualizado", f"{m['ret_anual_%']:.2f}%",
+                      delta=f"{m['ret_anual_%'] - m_bh['ret_anual_%']:.2f}% vs Buy&Hold")
+            c2.metric("Drawdown Máximo", f"{m['dd_%']:.2f}%")
+            c3.metric("Calmar", f"{m['calmar']:.3f}" if m["calmar"] is not None else "—")
+            st.caption(
+                f"Buy&Hold no mesmo período: {m_bh['ret_anual_%']:.2f}% anualizado, "
+                f"DD {m_bh['dd_%']:.2f}% · {_fmt_dt(m['ini'], False)} a {_fmt_dt(m['fim'], False)} "
+                f"({m['n_ativos']} ativos)"
+            )
+            _grafico_portfolio(m, m_bh, "Portfolio — holdout (22 assets)")
+        else:
+            st.info("Sem dados de holdout pra compor o portfólio.")
+
+    st.divider()
+    secao_modo_alocacao()
+
+
+@st.cache_data(ttl=3600)
+def regime_btc_atual(versao: str = ""):
+    """Retorna o regime BTC atual (BULL/LATERAL/BEAR) baseado no retorno dos
+    últimos 365 dias (mesma classificação usada na Fase 1 walk-forward)."""
+    df_btc = carregar_dados("BTCUSDT", "6h")
+    if df_btc is None or df_btc.empty or len(df_btc) < 2:
+        return None, None, None
+    preco_atual = float(df_btc["fechamento"].iloc[-1])
+    data_atual = pd.to_datetime(df_btc["t_abert"].iloc[-1])
+    df_12m = df_btc[pd.to_datetime(df_btc["t_abert"]) >= data_atual - pd.Timedelta(days=365)]
+    if df_12m.empty:
+        return None, None, None
+    ret_12m = (preco_atual / float(df_12m["fechamento"].iloc[0]) - 1) * 100
+    regime = "BULL" if ret_12m > 25 else ("BEAR" if ret_12m < -25 else "LATERAL")
+    return regime, ret_12m, preco_atual
+
+
+def secao_modo_alocacao():
+    regime_btc, ret_btc_12m, preco_btc = regime_btc_atual(VERSAO)
+    resumo_filter = carregar_resumo_filter()
+    modos_margem = carregar_modos_margem()
+
+    st.subheader("🧭 Modo de Alocação — Filtro de Regime BTC")
+    st.caption(
+        "Com base no retorno do BTC nos últimos 12 meses, ajuste o tamanho das suas posições. "
+        "Métricas históricas: re-backtest real com sizes dinâmicos por trade (período de desenvolvimento)."
+    )
+    if regime_btc is None:
+        st.info("Não foi possível calcular o regime BTC atual (sem conexão com a API).")
+        return
+
+    cor_regime = {"BULL": "#22c55e", "BEAR": "#ef4444"}.get(regime_btc, "#f59e0b")
+    emoji_regime = {"BULL": "🐂", "BEAR": "🐻"}.get(regime_btc, "↔️")
+    st.markdown(
+        f'<div style="background:{cor_regime}18; border:1px solid {cor_regime}55; border-left:4px solid {cor_regime}; '
+        f'border-radius:10px; padding:10px 16px; margin-bottom:12px;">'
+        f'<span style="font-size:1.05rem; font-weight:700; color:{cor_regime};">{emoji_regime} Regime BTC atual: {regime_btc}</span>'
+        f'<br><span style="font-size:0.85rem; color:#94a3b8;">BTC/USDT ${preco_btc:,.0f} · retorno 12m: {ret_btc_12m:+.1f}%</span>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
+    def _linha_media(nome):
+        if resumo_filter is None or nome not in resumo_filter.index:
+            return "Execute backtest_btc_filter_v4.py para ver métricas históricas."
+        r = resumo_filter.loc[nome]
+        return (f"<b>Média por ativo:</b> {r['ret_anual_pct']:+.1f}%/ano · DD {r['drawdown_pct']:.1f}% "
+                f"· Calmar {r['calmar']:.3f}")
+
+    def _linha_carteira(nome):
+        if modos_margem is None or nome not in modos_margem.index:
+            return ""
+        r = modos_margem.loc[nome]
+        cor = "#22c55e"
+        if str(r["exige_margem"]).strip().lower() == "sim":
+            cor = COR_DSR_ALERTA
+            return (
+                f'<div style="margin-top:8px; padding:6px 9px; border-radius:7px; background:{cor}22; '
+                f'color:{cor}; border:1px solid {cor}55; font-size:0.76rem; font-weight:600;">'
+                f'⚠️ EXIGE MARGEM em {r["pct_dias_acima_100"]:.0f}% do tempo — não é Spot puro.<br>'
+                f'<span style="font-weight:500;">Carteira composta: {r["cagr_margem_pct"]:+.1f}%/ano com '
+                f'margem; limitada a 100% do capital (Spot): <b>{r["cagr_spot_pct"]:+.1f}%/ano</b>, '
+                f'DD {r["dd_spot_pct"]:.1f}%.</span></div>'
+            )
+        return (
+            f'<div style="margin-top:8px; padding:6px 9px; border-radius:7px; background:{cor}18; '
+            f'color:{cor}; border:1px solid {cor}44; font-size:0.76rem; font-weight:600;">'
+            f'✅ Cabe em Spot puro (exposição mediana {r["exposicao_mediana"]:.0%}, nunca passa de 100%).<br>'
+            f'<span style="font-weight:500;">Carteira composta: <b>{r["cagr_spot_pct"]:+.1f}%/ano</b>, '
+            f'DD {r["dd_spot_pct"]:.1f}%.</span></div>'
+        )
+
+    modos = [
+        ("🛡️ Defensivo", "DEFENSIVO", "Sempre usa 100% dos pesos calculados. Linha de base.", "#64748b"),
+        ("⚖️ Filtrado", "FILTRADO", "Em anos BEAR do BTC, metade do capital fica em cash.", "#3b82f6"),
+        ("🚀 Agressivo", "AGRESSIVO", "Mais retorno em BULL, proteção em BEAR. Drawdown maior.", "#a855f7"),
+    ]
+    multi_recomendado = {
+        "BULL":    {"DEFENSIVO": "1×", "FILTRADO": "1×", "AGRESSIVO": "<b>1.5×</b> ← agora"},
+        "LATERAL": {"DEFENSIVO": "1×", "FILTRADO": "1×", "AGRESSIVO": "1×"},
+        "BEAR":    {"DEFENSIVO": "1×", "FILTRADO": "<b>0.5×</b> ← agora", "AGRESSIVO": "<b>0.5×</b> ← agora"},
+    }
+    for col, (nome, chave, desc, cor) in zip(st.columns(3), modos):
+        with col:
+            st.markdown(
+                f'<div style="background:{cor}14; border:1px solid {cor}44; border-radius:10px; padding:10px 14px;">'
+                f'<div style="font-weight:700; color:{cor}; font-size:0.95rem;">{nome}</div>'
+                f'<div style="font-size:0.78rem; color:#cbd5e1; margin-top:4px;">{desc}</div>'
+                f'<div style="font-size:0.78rem; color:#94a3b8; margin-top:6px;">{_linha_media(chave)}</div>'
+                f'{_linha_carteira(chave)}'
+                f'<div style="margin-top:8px; font-size:0.85rem; color:#f1f5f9;"><b>Agora ({regime_btc}):</b> '
+                f'{multi_recomendado[regime_btc][chave]}</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+    st.info(
+        "**Por que cada modo tem dois números?** São duas perguntas diferentes. **Média por ativo** = "
+        "cada uma das 22 moedas simulada sozinha, e a média dos resultados ponderada pelo peso. O "
+        "drawdown é alto porque cada moeda isolada cai muito. **Carteira composta** = as 8 veteranas "
+        "juntas numa carteira só, compondo dia a dia (ago/2020 a ago/2025). O drawdown é menor porque "
+        "as moedas não caem todas ao mesmo tempo. A carteira composta é a mais próxima do que você "
+        "teria na conta."
+    )
+    if modos_margem is not None and "AGRESSIVO" in modos_margem.index:
+        ag, de = modos_margem.loc["AGRESSIVO"], modos_margem.loc["DEFENSIVO"]
+        st.warning(
+            f"**Atenção ao modo Agressivo:** o multiplicador de 1.5× em BULL faz a exposição agregada "
+            f"do portfólio passar de 100% do capital em **{ag['pct_dias_acima_100']:.0f}% do tempo**. "
+            f"Isso exige margem (empréstimo), que a conta Spot da Binance não oferece. Respeitando o "
+            f"limite de 100% do capital, o Agressivo rende **{ag['cagr_spot_pct']:+.1f}%/ano em vez de "
+            f"{ag['cagr_margem_pct']:+.1f}%**, praticamente empatado com o Defensivo "
+            f"({de['cagr_spot_pct']:+.1f}%). Custo de juros e risco de liquidação da margem **não "
+            f"estão modelados em nenhum número deste app**. Ver `RELATORIO_RIQUEZA_TERMINAL.md`."
+        )
+
+
+# ============================================================================
+# 🔬 VALIDAÇÃO
+# ============================================================================
+def secao_validacao():
+    st.header("📊 Validação Multi-Regime — o que a estratégia faz bem (e o que não faz)")
+    df_wf = carregar_csv("walkforward_robusta_v4_janelas.csv")
+    if df_wf is None:
+        st.info("Rode `python walkforward_robusta_v4.py` para gerar os dados de validação.")
+        return
+    n_total = len(df_wf)
+    st.caption(
+        f"Walk-forward sobre {n_total} janelas anuais × ativo no período de desenvolvimento (até "
+        f"{DATA_CORTE_HOLDOUT:%d/%m/%Y}), receita robusta fixa, sem re-otimização por janela."
+    )
+    col_r1, col_r2, col_r3, col_r4 = st.columns(4)
+    col_r1.metric("Janelas analisadas", f"{n_total}")
+    col_r2.metric("Janelas positivas", f"{float((df_wf['Retorno_%'] > 0).mean() * 100):.0f}%")
+    col_r3.metric("Bate Buy&Hold", f"{float((df_wf['Retorno_%'] > df_wf['BH_%']).mean() * 100):.0f}%")
+    col_r4.metric("Retorno mediano/janela", f"{float(df_wf['Retorno_%'].median()):+.1f}%")
+
+    st.markdown("#### Por regime de mercado (regime do ativo naquele ano)")
+    linhas_regime, por_regime = [], {}
+    for regime in ["BULL", "LATERAL", "BEAR"]:
+        sub = df_wf[df_wf["Regime"] == regime]
+        if sub.empty:
+            continue
+        rv, bv = sub["Retorno_%"].values, sub["BH_%"].values
+        por_regime[regime] = {"est": float(np.median(rv)), "bh": float(np.median(bv)),
+                              "bate": float(np.mean(rv > bv) * 100), "n": len(rv)}
+        linhas_regime.append({
+            "Regime": regime, "Janelas": len(rv),
+            "Strat. mediana": f"{float(np.median(rv)):+.1f}%",
+            "B&H mediana": f"{float(np.median(bv)):+.1f}%",
+            "% positivas": f"{float(np.mean(rv > 0) * 100):.0f}%",
+            "Bate B&H": f"{float(np.mean(rv > bv) * 100):.0f}%",
+        })
+    if linhas_regime:
+        st.dataframe(pd.DataFrame(linhas_regime).set_index("Regime"), width="stretch")
+
+    leitura = []
+    if "BEAR" in por_regime:
+        r = por_regime["BEAR"]
+        leitura.append(f"- 🐻 **BEAR (queda):** estratégia {r['est']:+.0f}% (mediana) contra "
+                       f"{r['bh']:+.0f}% do B&H; bate o B&H em {r['bate']:.0f}% das janelas. É onde ela "
+                       f"mais protege.")
+    if "LATERAL" in por_regime:
+        r = por_regime["LATERAL"]
+        leitura.append(f"- ↔️ **LATERAL:** estratégia {r['est']:+.0f}% contra {r['bh']:+.0f}% do B&H; "
+                       f"bate em {r['bate']:.0f}% das janelas.")
+    if "BULL" in por_regime:
+        r = por_regime["BULL"]
+        leitura.append(f"- 🐂 **BULL (alta):** estratégia {r['est']:+.0f}% contra {r['bh']:+.0f}% do "
+                       f"B&H; bate em só {r['bate']:.0f}% das janelas. A saída por cruzamento corta os "
+                       f"vencedores cedo: é a principal fraqueza.")
+    st.markdown("**Leitura (calculada dos dados acima):**\n" + "\n".join(leitura))
+
+    st.markdown(
+        """
+**Resultados das pesquisas complementares** (rodadas em jul–ago/2026, período de desenvolvimento,
+números fixos dos relatórios):
+
+- **Trailing stop:** testado nas mesmas janelas, **piorou** em todos os regimes (−50pp em BULL). O
+  cruzamento + stop ATR fixo é a saída mais eficiente para esses parâmetros.
+- **Filtro de regime BTC:** sizes dinâmicos por trade (1.5× BULL / 1× LATERAL / 0.5× BEAR BTC).
+  Agressivo: +60.7%→+79.7%/ano, Calmar 1.158→1.316, mas exige margem (ver aba Portfólio).
+- **Vol-targeting:** arriscar uma fração fixa R do capital por trade. R=15% melhora Calmar de
+  1.158→1.314 com +61.4%/ano; drawdown cai de 62.3% para 55.5%.
+- **Slippage realista:** saídas de stop com slippage extra (5% do ATR nas líquidas, 25% nas
+  ilíquidas) custam −3.1pp/ano. A proteção em BEAR se sustenta: a estratégia sai geralmente por
+  cruzamento (antes do crash), não por stop.
+        """.strip()
+    )
+
+    df_front = carregar_fronteira()
+    if df_front is not None:
+        st.markdown("#### Fronteira de modos — resumo comparativo")
+        notas = {
+            "BTC-Agressivo":    "↑↑ retorno · ↑↑ DD · leverage 1.5× em BULL BTC",
+            "Vol-target R=15%": "= retorno · ↓↓ DD · melhor Sharpe · sizing pelo ATR",
+            "BTC-Filtrado":     "↑ retorno moderado · ↓ DD · proteção em BEAR BTC sem leverage",
+            "Baseline":         "referência — 100% do capital em cada trade",
+        }
+        df_disp = df_front.copy()
+        df_disp["Ret/ano"] = df_disp["ret_anual_pct"].apply(lambda x: f"+{x:.1f}%")
+        df_disp["Drawdown"] = df_disp["drawdown_pct"].apply(lambda x: f"{x:.1f}%")
+        df_disp["Calmar"] = df_disp["calmar"].apply(lambda x: f"{x:.3f}")
+        df_disp["Sharpe"] = df_disp["sharpe"].apply(lambda x: f"{x:.3f}")
+        df_disp["Perfil"] = df_disp["Estrategia"].map(notas).fillna("")
+        st.dataframe(
+            df_disp[["Estrategia", "Ret/ano", "Drawdown", "Calmar", "Sharpe", "Perfil"]].set_index("Estrategia"),
+            width="stretch",
+        )
+        st.caption(
+            "Vol-target e BTC-filter testados separadamente — não existe backtest da combinação dos dois. "
+            "Período de desenvolvimento, médias ponderadas pelos 22 ativos. "
+            "BTC-Agressivo e Vol-target R=15% têm Calmar quase idêntico mas perfis opostos: "
+            "um dá mais retorno com mais DD, o outro dá o mesmo retorno com menos DD."
+        )
+
+    st.markdown("#### Distribuição dos retornos anuais (estratégia vs B&H)")
+    # rótulos em inglês: o usuário tira print destes gráficos pra publicar
+    df_melt = (df_wf[["Retorno_%", "BH_%"]]
+               .rename(columns={"Retorno_%": "Strategy", "BH_%": "Buy & Hold"})
+               .melt(var_name="Series", value_name="Return"))
+    if not df_melt.empty:
+        hist = (
+            alt.Chart(df_melt)
+            .mark_bar(opacity=0.65, binSpacing=1)
+            .encode(
+                x=alt.X("Return:Q", bin=alt.Bin(maxbins=40), title="Annual return (%)"),
+                y=alt.Y("count():Q", title="Asset-year windows"),
+                color=alt.Color("Series:N",
+                                scale=alt.Scale(domain=["Strategy", "Buy & Hold"], range=[COR_ESTRATEGIA, COR_BUYHOLD]),
+                                legend=alt.Legend(title=None, orient="top")),
+                tooltip=[alt.Tooltip("Series:N", title="Series"), alt.Tooltip("count():Q", title="Windows")],
+            )
+            .properties(height=230, background="transparent",
+                        title=alt.TitleParams(f"Annual return distribution — {n_total} asset-year windows",
+                                              color="#e2e8f0", fontSize=13, fontWeight=600,
+                                              anchor="start", offset=8))
+            .configure_axis(gridColor="#262d3d", labelColor="#9aa4b8", titleColor="#9aa4b8")
+            .configure_view(strokeWidth=0)
+            .configure_legend(labelColor="#e5e7eb", labelFontSize=12)
+        )
+        st.altair_chart(hist, width="stretch")
+
+
+# ============================================================================
+# 🕶️ SOMBRA & EXECUÇÃO
+# ============================================================================
+SLIPPAGE_MAX_ASSUMIDO_PCT = 0.175   # o maior slippage por lado que o backtest assume
+DISPONIBILIDADE_MINIMA = 0.95       # Fase 5 com dinheiro real exige o robô de pé
+
+
+def secao_sombra():
+    st.header("🕶️ Sombra & Execução — Fase 4")
+    st.caption(
+        "A Sombra roda de hora em hora junto com o monitor de e-mail. Ela decide de verdade, com os "
+        "sinais de verdade, e registra a ordem que **teria** enviado, sem enviar nada. É ela que "
+        "mostra se dá pra ir pra Fase 5 (dinheiro real)."
+    )
+    r = carregar_sombra(VERSAO)
+    if r is None:
+        st.info("Os dados da Sombra só existem no PC onde ela roda (os arquivos não vão pro Git). "
+                "Abra o Radar pelo atalho no seu computador pra ver esta aba.")
+        return
+    if "erro" in r:
+        st.warning(f"Não consegui ler os arquivos da Sombra agora ({r['erro']}). Tente de novo em instantes.")
+        return
+
+    disp = r["disponibilidade"]
+    ex = r["execucao"]
+    n_fech = len(r["fechados"])
+
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Resultado (com custos)", f"${r['resultado_usd']:+.2f}",
+              delta=f"{r['resultado_pct']:+.2f}% sobre ${r['capital']:.0f}")
+    k2.metric("Trades fechados", f"{r['acertos']}/{n_fech} positivos" if n_fech else "0",
+              help=f"Fechados: ${r['resultado_fechados_usd']:+.2f} · abertos: ${r['resultado_abertos_usd']:+.2f}")
+    k3.metric("PC ligado", f"{disp['pct']:.0%}" if disp else "—",
+              help=f"{disp['rodadas']} de {disp['esperadas']} rodadas horárias aconteceram" if disp else None)
+    k4.metric("Custo de execução", f"{ex.get('custo_execucao_no_horario_pct', 0):+.3f}%",
+              help="Quanto, em média, o preço real da decisão foi pior que o preço do backtest, nas "
+                   "decisões tomadas no horário (até 1h depois do sinal). Positivo = pior.")
+
+    # ---- semáforo da Fase 5 ----
+    st.markdown("#### 🚦 Pronto pra Fase 5 (dinheiro real)?")
+    # início = primeira rodada da sombra (relógio do PC); sem log, a 1ª decisão (UTC)
+    inicio = disp["inicio"] if disp else (brt(r["inicio"]) if r["inicio"] is not None else None)
+    dias = (datetime.now() - inicio).days if inicio is not None else 0
+    criterios = [
+        (dias >= 28, f"Tempo mínimo de 4 semanas de Sombra: **{dias} dias** desde "
+                     f"{inicio:%d/%m/%Y}" if inicio is not None else "Sem data de início"),
+        ((ex.get("custo_execucao_no_horario_pct") or 0) <= SLIPPAGE_MAX_ASSUMIDO_PCT,
+         f"Execução fiel ao backtest: custo médio de **{ex.get('custo_execucao_no_horario_pct', 0):+.3f}%** "
+         f"por decisão no horário (limite: o slippage que o backtest assume, até {SLIPPAGE_MAX_ASSUMIDO_PCT}%)"),
+        (bool(disp) and disp["pct"] >= DISPONIBILIDADE_MINIMA,
+         f"Robô sempre de pé: **{disp['pct']:.0%}** das horas (mínimo {DISPONIBILIDADE_MINIMA:.0%}). "
+         f"Com dinheiro real, PC desligado = venda que não acontece" if disp else "Sem dados de disponibilidade"),
+    ]
+    for ok, texto in criterios:
+        st.markdown(f"{'✅' if ok else '❌'} {texto}")
+    if all(ok for ok, _ in criterios):
+        st.success("Todos os critérios atendidos: dá pra conversar sobre a Fase 5.")
+    else:
+        st.error("Ainda não. Os critérios em ❌ precisam ser resolvidos antes de colocar dinheiro real.")
+
+    # ---- disponibilidade por dia ----
+    if disp:
+        st.markdown("#### 🖥️ Quanto o PC ficou ligado, dia a dia")
+        horas = pd.Series(1, index=pd.DatetimeIndex(disp["horas_com_rodada"]))
+        por_dia = horas.groupby(horas.index.normalize()).sum()
+        d_ini, d_fim = pd.Timestamp(disp["inicio"]), pd.Timestamp(disp["fim"])
+        dias_idx = pd.date_range(d_ini.normalize(), d_fim.normalize(), freq="D")
+        esperadas = []
+        for d in dias_idx:
+            ini_d = max(d, d_ini)
+            fim_d = min(d + pd.Timedelta(hours=23), d_fim)
+            esperadas.append(int((fim_d - ini_d) / pd.Timedelta(hours=1)) + 1)
+        df_up = pd.DataFrame({"Dia": dias_idx, "Esperadas": esperadas,
+                              "Rodadas": por_dia.reindex(dias_idx).fillna(0).astype(int).values})
+        df_up["Ligado (%)"] = (df_up["Rodadas"] / df_up["Esperadas"] * 100).clip(upper=100)
+        df_up["Faixa"] = np.where(df_up["Ligado (%)"] >= 95, "ok", np.where(df_up["Ligado (%)"] >= 60, "parcial", "ruim"))
+        df_up["Data"] = df_up["Dia"].dt.strftime("%d/%m")
+        graf = (
+            alt.Chart(df_up).mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3)
+            .encode(
+                x=alt.X("Data:O", sort=None, title=None, axis=alt.Axis(labelAngle=-45)),
+                y=alt.Y("Ligado (%):Q", scale=alt.Scale(domain=[0, 100]), title="% das horas"),
+                color=alt.Color("Faixa:N", legend=None, scale=alt.Scale(
+                    domain=["ok", "parcial", "ruim"], range=[COR_ALTA, COR_DSR_ALERTA, COR_BAIXA])),
+                tooltip=[alt.Tooltip("Dia:T", format="%d/%m/%Y"), "Rodadas:Q", "Esperadas:Q",
+                         alt.Tooltip("Ligado (%):Q", format=".0f")],
+            )
+            .properties(height=200, background="transparent")
+            .configure_axis(gridColor="#262d3d", labelColor="#9aa4b8", titleColor="#9aa4b8")
+            .configure_view(strokeWidth=0)
+        )
+        st.altair_chart(graf, width="stretch")
+        grandes = [b for b in disp["buracos"] if b["horas"] >= 3]
+        if grandes:
+            with st.expander(f"Períodos desligado (3h ou mais): {len(grandes)}"):
+                st.dataframe(pd.DataFrame([{
+                    "De": b["de"], "Até": b["ate"] + pd.Timedelta(minutes=59), "Horas": b["horas"]
+                } for b in grandes]).iloc[::-1], hide_index=True, width="stretch",
+                    column_config={"De": st.column_config.DatetimeColumn(format="DD/MM/YYYY HH:mm"),
+                                   "Até": st.column_config.DatetimeColumn(format="DD/MM/YYYY HH:mm")})
+
+    # ---- posições abertas ----
+    st.markdown(f"#### 📂 Posições abertas na Sombra: {len(r['abertos'])}")
+    if r["abertos"]:
+        df_a = pd.DataFrame([{
+            "Ativo": t["ativo"], "Desde": brt(t["compra"]), "Valor ($)": t["valor_usd"],
+            "Preço compra": t["preco_compra"], "Preço agora": t["preco_atual"],
+            "Stop": t["stop"], "Resultado (%)": round(t["resultado_pct"], 2),
+            "Resultado ($)": round(t["resultado_usd"], 2),
+        } for t in r["abertos"]]).sort_values("Desde", ascending=False)
+        st.dataframe(df_a.style.map(_cor_resultado, subset=["Resultado (%)", "Resultado ($)"]),
+                     hide_index=True, width="stretch", column_config={
+                         "Desde": st.column_config.DatetimeColumn(format="DD/MM/YYYY HH:mm"),
+                         "Valor ($)": st.column_config.NumberColumn(format="$%.2f"),
+                         "Preço compra": st.column_config.NumberColumn(format="%.6g"),
+                         "Preço agora": st.column_config.NumberColumn(format="%.6g"),
+                         "Stop": st.column_config.NumberColumn(format="%.6g"),
+                         "Resultado (%)": st.column_config.NumberColumn(format="%+.2f%%"),
+                         "Resultado ($)": st.column_config.NumberColumn(format="$%+.2f"),
+                     })
+    else:
+        st.caption("Nenhuma posição aberta agora.")
+
+    # ---- backtest x sombra, trade a trade ----
+    st.markdown(f"#### ⚖️ Backtest × Sombra, trade a trade: {n_fech} fechados")
+    if r["fechados"]:
+        df_f = pd.DataFrame([{
+            "Ativo": t["ativo"], "Compra": brt(t["compra"]), "Venda": brt(t["venda"]),
+            "Valor ($)": t["valor_usd"],
+            "Backtest (%)": round(t["resultado_bt_pct"], 2), "Sombra (%)": round(t["resultado_pct"], 2),
+            "Diferença (pp)": round(t["resultado_pct"] - t["resultado_bt_pct"], 2),
+            "Resultado ($)": round(t["resultado_usd"], 2),
+        } for t in r["fechados"]]).sort_values("Venda", ascending=False)
+        st.dataframe(df_f.style.map(_cor_resultado, subset=["Backtest (%)", "Sombra (%)", "Diferença (pp)", "Resultado ($)"]),
+                     hide_index=True, width="stretch",
+                     height=min(460, 38 + 35 * len(df_f)), column_config={
+                         "Compra": st.column_config.DatetimeColumn(format="DD/MM/YYYY HH:mm"),
+                         "Venda": st.column_config.DatetimeColumn(format="DD/MM/YYYY HH:mm"),
+                         "Valor ($)": st.column_config.NumberColumn(format="$%.2f"),
+                         "Backtest (%)": st.column_config.NumberColumn(format="%+.2f%%"),
+                         "Sombra (%)": st.column_config.NumberColumn(format="%+.2f%%"),
+                         "Diferença (pp)": st.column_config.NumberColumn(format="%+.2f"),
+                         "Resultado ($)": st.column_config.NumberColumn(format="$%+.2f"),
+                     })
+        dif = df_f["Diferença (pp)"]
+        st.caption(
+            f"Diferença média: {dif.mean():+.2f}pp por trade (positivo = a Sombra foi melhor que o "
+            f"backtest). Backtest = abertura do candle do sinal; Sombra = preço real no instante da "
+            f"decisão. Os dois já descontam taxa + slippage do grupo do ativo."
+        )
+
+    # ---- qualidade da execução ----
+    with st.expander(f"🔎 Todas as {ex.get('n', 0)} decisões registradas (preço, atraso, desvio)"):
+        st.caption(
+            f"Atraso mediano: {ex.get('atraso_mediano_h', 0) * 60:.0f} min · {ex.get('atrasadas', 0)} "
+            f"decisões com mais de 1h de atraso (PC desligado na hora do sinal) · custo médio "
+            f"considerando também as atrasadas: {ex.get('custo_execucao_medio_pct', 0):+.3f}% · "
+            f"exposição máxima: {ex.get('exposicao_max_pct') or 0:.0f}% do capital."
+        )
+        reg = r["registro"]
+        df_r = pd.DataFrame({
+            "Quando": reg["data_hora"].map(brt), "Ativo": reg["ativo"],
+            "Ação": reg["acao"].map({"BUY": "🟢 Compra", "SELL": "🔴 Venda"}),
+            "Preço backtest": reg["preco_backtest"], "Preço real": reg["preco_agora"],
+            "Desvio (%)": reg["desvio_pct"], "Atraso (h)": reg["atraso_h"],
+            "Valor ($)": reg["valor_usd"],
+        }).iloc[::-1]
+        st.dataframe(df_r, hide_index=True, width="stretch", column_config={
+            "Quando": st.column_config.DatetimeColumn(format="DD/MM/YYYY HH:mm"),
+            "Preço backtest": st.column_config.NumberColumn(format="%.6g"),
+            "Preço real": st.column_config.NumberColumn(format="%.6g"),
+            "Desvio (%)": st.column_config.NumberColumn(format="%+.2f%%"),
+            "Atraso (h)": st.column_config.NumberColumn(format="%.1f"),
+            "Valor ($)": st.column_config.NumberColumn(format="$%.2f"),
+        })
+
+
+# ============================================================================
+# Navegação: só a seção escolhida é calculada e desenhada (abre mais rápido)
+# ============================================================================
+SECOES = {
+    "📡 Radar": secao_radar,
+    "📊 Portfólio": secao_portfolio,
+    "🕶️ Sombra & Execução": secao_sombra,
+    "🔬 Validação": secao_validacao,
+}
+escolha = st.segmented_control("Seção", list(SECOES), default="📡 Radar", key="nav",
+                               label_visibility="collapsed") or "📡 Radar"
+st.divider()
+SECOES[escolha]()
